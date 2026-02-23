@@ -19,8 +19,8 @@
     "cors": "^2.8.5",
     "dotenv": "^16.4.0",
     "express": "^4.21.0",
-    "langfuse": "^3.0.0",
-    "@langfuse/langchain": "^3.0.0",
+    "langfuse": "^3.38.0",
+    "@langfuse/langchain": "^4.6.0",
     "langchain": "^0.3.0",
     "tsx": "^4.19.0",
     "zod": "^3.23.0"
