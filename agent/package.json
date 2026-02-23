@@ -10,7 +10,7 @@
     "test:integration": "RUN_INTEGRATION_TESTS=1 vitest run tests/agent.integration.test.ts",
     "test:watch": "vitest",
     "eval": "tsx eval/run-eval.ts",
-    "build": "tsc"
+    "build:local": "tsc"
   },
   "dependencies": {
     "@langchain/anthropic": "^0.3.0",
