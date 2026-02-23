@@ -34,3 +34,7 @@ coverage/js-unit
 
 # phpstan
 tmp-phpstan/*
+
+# claude code
+.agents/
+skills-lock.json
