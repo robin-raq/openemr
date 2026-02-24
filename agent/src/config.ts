@@ -47,6 +47,7 @@ export function getDataSource(): DataSource {
       clientSecret: process.env.FHIR_CLIENT_SECRET,
       username,
       password,
+      scope: process.env.FHIR_SCOPE,
     });
   }
   return new MockDataSource();
