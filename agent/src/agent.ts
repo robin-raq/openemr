@@ -10,7 +10,7 @@ import { allergyCheck } from "./tools/allergy-check";
 import { getLabResults } from "./tools/lab-results";
 import { applyVerification } from "./verification/verification";
 
-const AGENT_TIMEOUT_MS = 30_000;
+const AGENT_TIMEOUT_MS = 60_000;
 const MAX_HISTORY_MESSAGES = 20;
 
 const SYSTEM_PROMPT = `You are a clinical query assistant for OpenEMR, a healthcare electronic health records system.
@@ -116,7 +116,7 @@ export async function chat(
     );
 
     const timeoutPromise = new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error("Agent timed out after 30 seconds")), AGENT_TIMEOUT_MS)
+      setTimeout(() => reject(new Error(`Agent timed out after ${AGENT_TIMEOUT_MS / 1000} seconds`)), AGENT_TIMEOUT_MS)
     );
 
     const result = await Promise.race([resultPromise, timeoutPromise]);
