@@ -8,6 +8,7 @@
     "start": "tsx src/server.ts",
     "test": "vitest run",
     "test:integration": "RUN_INTEGRATION_TESTS=1 vitest run tests/agent.integration.test.ts",
+    "test:integration:fhir": "RUN_FHIR_INTEGRATION_TESTS=1 vitest run tests/fhir-integration.test.ts",
     "test:watch": "vitest",
     "eval": "tsx eval/run-eval.ts",
     "build:local": "tsc"

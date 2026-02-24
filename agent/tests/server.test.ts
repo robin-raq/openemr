@@ -1,11 +1,9 @@
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from "vitest";
 import express from "express";
-import type { Server } from "http";
 
-// We test the server's middleware/routes by importing a factory function
-// that creates the Express app (without starting it).
-// This requires refactoring server.ts to export createApp().
 import { createApp } from "../src/server";
+
+const originalEnv = { ...process.env };
 
 describe("server", () => {
   let app: express.Express;
@@ -59,9 +57,62 @@ describe("server", () => {
       expect(res.headers["x-content-type-options"]).toBe("nosniff");
     });
 
-    it("sets X-Frame-Options: DENY", async () => {
-      const res = await makeRequest(app, "GET", "/api/health");
-      expect(res.headers["x-frame-options"]).toBe("DENY");
+    it("sets X-Frame-Options: DENY when OPENEMR_ORIGINS not set", async () => {
+      const prev = process.env.OPENEMR_ORIGINS;
+      delete process.env.OPENEMR_ORIGINS;
+      try {
+        vi.resetModules();
+        const { createApp: createAppNoOrigins } = await import("../src/server");
+        const appNoOrigins = createAppNoOrigins();
+        const res = await makeRequest(appNoOrigins, "GET", "/api/health");
+        expect(res.headers["x-frame-options"]).toBe("DENY");
+      } finally {
+        if (prev !== undefined) process.env.OPENEMR_ORIGINS = prev;
+        vi.resetModules();
+      }
+    });
+
+    it("sets Content-Security-Policy frame-ancestors when OPENEMR_ORIGINS is set", async () => {
+      const prev = process.env.OPENEMR_ORIGINS;
+      process.env.OPENEMR_ORIGINS = "https://localhost:8300";
+      try {
+        vi.resetModules();
+        const { createApp: createAppWithOrigins } = await import("../src/server");
+        const appWithOrigins = createAppWithOrigins();
+        const res = await makeRequest(appWithOrigins, "GET", "/api/health");
+        expect(res.headers["content-security-policy"]).toContain("frame-ancestors");
+        expect(res.headers["content-security-policy"]).toContain("https://localhost:8300");
+        expect(res.headers["x-frame-options"]).toBeUndefined();
+      } finally {
+        process.env.OPENEMR_ORIGINS = prev;
+        vi.resetModules();
+      }
+    });
+  });
+
+  describe("patient context", () => {
+    it("accepts patient_id in POST /api/chat body without 400 error", async () => {
+      // This test verifies the server doesn't reject requests with patient_id.
+      // The actual chat call may fail (no API key in test env), so we check
+      // that the error is NOT a validation error (400) — it should be 500 (agent error)
+      // or 200 (if API key is set).
+      const res = await makeRequest(app, "POST", "/api/chat", {
+        message: "What medications is patient 1 on?",
+        session_id: "test-patient-ctx-" + Date.now(),
+        patient_id: "1",
+      });
+      // Should not be a validation error — patient_id is accepted
+      expect(res.status).not.toBe(400);
+    });
+
+    it("ignores non-numeric patient_id", async () => {
+      const res = await makeRequest(app, "POST", "/api/chat", {
+        message: "Hello",
+        session_id: "test-bad-pid-" + Date.now(),
+        patient_id: "'; DROP TABLE patients; --",
+      });
+      // Should not be a validation error — bad patient_id is silently ignored
+      expect(res.status).not.toBe(400);
     });
   });
 

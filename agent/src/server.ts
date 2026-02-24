@@ -4,6 +4,12 @@ import path from "path";
 import { chat } from "./agent";
 import { PORT, getLangfuseCallbacks } from "./config";
 
+function getOpenEmrOrigins(): string | undefined {
+  const val = process.env.OPENEMR_ORIGINS;
+  if (!val || val.trim() === "") return undefined;
+  return val.trim();
+}
+
 type HistoryEntry = { role: "user" | "assistant"; content: string };
 
 const MAX_SESSIONS = 1000;
@@ -61,7 +67,12 @@ export function createApp(): express.Express {
   // Security headers
   app.use((_req, res, next) => {
     res.setHeader("X-Content-Type-Options", "nosniff");
-    res.setHeader("X-Frame-Options", "DENY");
+    const openEmrOrigins = getOpenEmrOrigins();
+    if (openEmrOrigins) {
+      res.setHeader("Content-Security-Policy", `frame-ancestors ${openEmrOrigins}`);
+    } else {
+      res.setHeader("X-Frame-Options", "DENY");
+    }
     next();
   });
 
@@ -76,7 +87,7 @@ export function createApp(): express.Express {
 
   app.post("/api/chat", async (req, res) => {
     try {
-      const { message, session_id } = req.body;
+      const { message, session_id, patient_id } = req.body;
       if (!message || typeof message !== "string") {
         res.status(400).json({ error: "message is required" });
         return;
@@ -95,10 +106,15 @@ export function createApp(): express.Express {
         return;
       }
 
+      let effectiveMessage = message;
+      if (patient_id && typeof patient_id === "string" && patient_id.trim() !== "") {
+        effectiveMessage = `[Context: Currently viewing patient ${patient_id.trim()}]\n\n${message}`;
+      }
+
       const history = getSessionHistory(sessionId);
       const callbacks = getLangfuseCallbacks(sessionId);
 
-      const result = await chat(message, sessionId, history, callbacks);
+      const result = await chat(effectiveMessage, sessionId, history, callbacks);
 
       // chat() mutates history with user + assistant messages
       setSessionHistory(sessionId, history);

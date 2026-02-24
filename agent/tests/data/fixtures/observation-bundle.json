@@ -1,0 +1,47 @@
+{
+  "resourceType": "Bundle",
+  "type": "searchset",
+  "total": 4,
+  "entry": [
+    {
+      "resource": {
+        "resourceType": "Observation",
+        "code": { "text": "INR" },
+        "valueQuantity": { "value": 2.5, "unit": "" },
+        "referenceRange": [{ "low": { "value": 2 }, "high": { "value": 3 } }],
+        "interpretation": [{ "coding": [{ "code": "N" }] }],
+        "effectiveDateTime": "2024-01-10"
+      }
+    },
+    {
+      "resource": {
+        "resourceType": "Observation",
+        "code": { "text": "HbA1c" },
+        "valueQuantity": { "value": 7.2, "unit": "%" },
+        "referenceRange": [{ "low": { "value": 4 }, "high": { "value": 5.6 } }],
+        "interpretation": [{ "coding": [{ "code": "H" }] }],
+        "effectiveDateTime": "2024-01-08"
+      }
+    },
+    {
+      "resource": {
+        "resourceType": "Observation",
+        "code": { "text": "Potassium" },
+        "valueQuantity": { "value": 5.3, "unit": "mEq/L" },
+        "referenceRange": [{ "low": { "value": 3.5 }, "high": { "value": 5 } }],
+        "interpretation": [{ "coding": [{ "code": "HH" }] }],
+        "effectiveDateTime": "2024-01-12"
+      }
+    },
+    {
+      "resource": {
+        "resourceType": "Observation",
+        "code": { "text": "Creatinine" },
+        "valueQuantity": { "value": 1.1, "unit": "mg/dL" },
+        "referenceRange": [{ "low": { "value": 0.7 }, "high": { "value": 1.3 } }],
+        "interpretation": [{ "coding": [{ "code": "N" }] }],
+        "effectiveDateTime": "2024-01-10"
+      }
+    }
+  ]
+}

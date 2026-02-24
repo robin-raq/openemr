@@ -1,0 +1,25 @@
+{
+  "resourceType": "Bundle",
+  "type": "searchset",
+  "total": 3,
+  "entry": [
+    {
+      "resource": {
+        "resourceType": "Condition",
+        "code": { "text": "Atrial Fibrillation" }
+      }
+    },
+    {
+      "resource": {
+        "resourceType": "Condition",
+        "code": { "text": "Hypertension" }
+      }
+    },
+    {
+      "resource": {
+        "resourceType": "Condition",
+        "code": { "text": "Type 2 Diabetes" }
+      }
+    }
+  ]
+}

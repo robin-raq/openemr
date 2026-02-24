@@ -1,0 +1,13 @@
+{
+  "resourceType": "Bundle",
+  "type": "searchset",
+  "total": 1,
+  "entry": [
+    {
+      "resource": {
+        "resourceType": "AllergyIntolerance",
+        "code": { "text": "Penicillin" }
+      }
+    }
+  ]
+}

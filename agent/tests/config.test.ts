@@ -51,4 +51,32 @@ describe("config", () => {
       expect(() => getAnthropicApiKey()).toThrow();
     });
   });
+
+  describe("getDataSource", () => {
+    it("returns MockDataSource when DATA_SOURCE is mock or unset", async () => {
+      process.env.DATA_SOURCE = "mock";
+      const { getDataSource } = await import("../src/config");
+      const ds = getDataSource();
+      expect(ds.constructor.name).toBe("MockDataSource");
+    });
+
+    it("returns FhirDataSource when DATA_SOURCE is fhir and required env vars are set", async () => {
+      process.env.DATA_SOURCE = "fhir";
+      process.env.FHIR_BASE_URL = "https://localhost:9300/apis/default/fhir";
+      process.env.FHIR_CLIENT_ID = "test-client";
+      process.env.FHIR_USERNAME = "admin";
+      process.env.FHIR_PASSWORD = "pass";
+      const { getDataSource } = await import("../src/config");
+      const ds = getDataSource();
+      expect(ds.constructor.name).toBe("FhirDataSource");
+    });
+
+    it("throws when DATA_SOURCE is fhir but required env vars are missing", async () => {
+      process.env.DATA_SOURCE = "fhir";
+      delete process.env.FHIR_BASE_URL;
+      delete process.env.FHIR_CLIENT_ID;
+      const { getDataSource } = await import("../src/config");
+      expect(() => getDataSource()).toThrow("FHIR datasource requires");
+    });
+  });
 });

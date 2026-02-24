@@ -1,0 +1,64 @@
+{
+  "resourceType": "Bundle",
+  "type": "searchset",
+  "total": 3,
+  "entry": [
+    {
+      "resource": {
+        "resourceType": "MedicationRequest",
+        "status": "active",
+        "authoredOn": "2023-01-15",
+        "requester": { "display": "Dr. Smith" },
+        "medicationCodeableConcept": { "text": "Warfarin" },
+        "dosageInstruction": [
+          {
+            "doseAndRate": [
+              {
+                "doseQuantity": { "value": 5, "unit": "mg" }
+              }
+            ],
+            "timing": { "code": { "text": "daily" } }
+          }
+        ]
+      }
+    },
+    {
+      "resource": {
+        "resourceType": "MedicationRequest",
+        "status": "active",
+        "authoredOn": "2022-06-01",
+        "requester": { "display": "Dr. Smith" },
+        "medicationCodeableConcept": { "text": "Lisinopril" },
+        "dosageInstruction": [
+          {
+            "doseAndRate": [
+              {
+                "doseQuantity": { "value": 10, "unit": "mg" }
+              }
+            ],
+            "timing": { "code": { "text": "daily" } }
+          }
+        ]
+      }
+    },
+    {
+      "resource": {
+        "resourceType": "MedicationRequest",
+        "status": "active",
+        "authoredOn": "2021-03-10",
+        "requester": { "display": "Dr. Johnson" },
+        "medicationCodeableConcept": { "text": "Metformin" },
+        "dosageInstruction": [
+          {
+            "doseAndRate": [
+              {
+                "doseQuantity": { "value": 500, "unit": "mg" }
+              }
+            ],
+            "timing": { "code": { "text": "twice daily" } }
+          }
+        ]
+      }
+    }
+  ]
+}

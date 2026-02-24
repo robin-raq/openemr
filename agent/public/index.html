@@ -318,6 +318,14 @@
     const patientSelect = document.getElementById('patient-select');
     let messageIndex = 0;
 
+    (function initFromUrl() {
+      const params = new URLSearchParams(window.location.search);
+      const pid = params.get('pid');
+      if (pid && patientSelect.querySelector('option[value="' + pid + '"]')) {
+        patientSelect.value = pid;
+      }
+    })();
+
     const TOOL_ICONS = {
       get_patient_summary: '\u{1F464}',
       get_medications: '\u{1F48A}',
@@ -427,10 +435,15 @@
       messageInput.disabled = true;
       setThinking(true);
       try {
+        const patientId = patientSelect.value || null;
         const res = await fetch('/api/chat', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ message: msg, session_id: sessionId })
+          body: JSON.stringify({
+            message: msg,
+            session_id: sessionId,
+            patient_id: patientId
+          })
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || 'Request failed');
