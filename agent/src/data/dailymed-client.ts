@@ -9,10 +9,36 @@
  */
 
 import { getErrorMessage } from "../utils/errors";
+import { TtlCache } from "../cache";
 
 const DAILYMED_BASE_URL =
   "https://dailymed.nlm.nih.gov/dailymed/services/v2";
 const REQUEST_TIMEOUT_MS = 10_000;
+
+/** 24-hour TTL for DailyMed data — drug labels are essentially static. */
+const DAILYMED_CACHE_TTL_MS = 86_400_000;
+/** Max 200 cached drug entries with LRU eviction. */
+const DAILYMED_CACHE_MAX_ENTRIES = 200;
+
+/**
+ * Module-level singleton cache for DailyMed lookups.
+ * DailyMed data is globally static (not per-patient), so a shared cache is appropriate.
+ */
+const dailymedSearchCache = new TtlCache<DailyMedSearchResult[]>({
+  ttlMs: DAILYMED_CACHE_TTL_MS,
+  maxEntries: DAILYMED_CACHE_MAX_ENTRIES,
+});
+
+const dailymedEducationCache = new TtlCache<DrugEducationInfo | null>({
+  ttlMs: DAILYMED_CACHE_TTL_MS,
+  maxEntries: DAILYMED_CACHE_MAX_ENTRIES,
+});
+
+/** Clear all DailyMed caches. Useful for testing. */
+export function clearDailyMedCache(): void {
+  dailymedSearchCache.clear();
+  dailymedEducationCache.clear();
+}
 
 /** LOINC section codes for SPL label sections */
 const SPL_SECTION_CODES = {
@@ -63,6 +89,10 @@ export async function searchDrug(
   drugName: string,
   pageSize = 3
 ): Promise<DailyMedSearchResult[]> {
+  const cacheKey = `${drugName.toLowerCase()}:${pageSize}`;
+  const cached = dailymedSearchCache.get(cacheKey);
+  if (cached) return cached;
+
   const url = `${DAILYMED_BASE_URL}/spls.json?drug_name=${encodeURIComponent(drugName)}&pagesize=${pageSize}`;
 
   const response = await fetchWithTimeout(url, REQUEST_TIMEOUT_MS);
@@ -71,7 +101,7 @@ export async function searchDrug(
   }
 
   const data = await response.json();
-  return (data.data || []).map(
+  const results = (data.data || []).map(
     (entry: {
       setid: string;
       title: string;
@@ -84,6 +114,8 @@ export async function searchDrug(
       spl_version: entry.spl_version,
     })
   );
+  dailymedSearchCache.set(cacheKey, results);
+  return results;
 }
 
 /**
@@ -121,8 +153,17 @@ export async function getDrugEducation(
   drugName: string,
   onlySections?: Set<string>
 ): Promise<DrugEducationInfo | null> {
+  // Cache key uses lowercased drug name. onlySections is not included in the
+  // key because the full label is always fetched; filtering is done post-fetch.
+  const cacheKey = drugName.toLowerCase();
+  const cached = dailymedEducationCache.get(cacheKey);
+  if (cached !== undefined) return cached;
+
   const results = await searchDrug(drugName, 1);
-  if (results.length === 0) return null;
+  if (results.length === 0) {
+    dailymedEducationCache.set(cacheKey, null);
+    return null;
+  }
 
   const top = results[0];
   const sections = await getDrugLabel(top.setid);
@@ -133,7 +174,7 @@ export async function getDrugEducation(
     return section ? section.text : null;
   };
 
-  return {
+  const info: DrugEducationInfo = {
     drug_name: drugName,
     setid: top.setid,
     title: top.title,
@@ -148,6 +189,9 @@ export async function getDrugEducation(
     source: "DailyMed (NLM/NIH)",
     fetched_at: new Date().toISOString(),
   };
+
+  dailymedEducationCache.set(cacheKey, info);
+  return info;
 }
 
 /**

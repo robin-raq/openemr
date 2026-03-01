@@ -5,6 +5,7 @@ import {
   getDrugLabel,
   getDrugEducation,
   SPL_SECTION_CODES,
+  clearDailyMedCache,
 } from "../../src/data/dailymed-client";
 
 describe("dailymed-client", () => {
@@ -156,5 +157,147 @@ describe("dailymed-client", () => {
       },
       15_000
     );
+  });
+
+  describe("DailyMed caching (24h TTL)", () => {
+    let fetchMock: ReturnType<typeof vi.fn>;
+
+    beforeEach(() => {
+      clearDailyMedCache();
+      fetchMock = vi.fn();
+      vi.stubGlobal("fetch", fetchMock);
+    });
+
+    afterEach(() => {
+      vi.unstubAllGlobals();
+      clearDailyMedCache();
+    });
+
+    it("searchDrug caches results — second call does not fetch", async () => {
+      fetchMock.mockResolvedValue({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            data: [
+              {
+                setid: "abc-123",
+                title: "LISINOPRIL",
+                published_date: "2024-01-01",
+                spl_version: 1,
+              },
+            ],
+          }),
+      });
+
+      const r1 = await searchDrug("lisinopril", 3);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+
+      const r2 = await searchDrug("lisinopril", 3);
+      // Should still be 1 — cached
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(r1).toEqual(r2);
+    });
+
+    it("searchDrug cache is case-insensitive", async () => {
+      fetchMock.mockResolvedValue({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            data: [
+              {
+                setid: "abc-123",
+                title: "LISINOPRIL",
+                published_date: "2024-01-01",
+                spl_version: 1,
+              },
+            ],
+          }),
+      });
+
+      await searchDrug("Lisinopril", 3);
+      await searchDrug("lisinopril", 3);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("getDrugEducation caches results — second call does not fetch", async () => {
+      // searchDrug mock
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            data: [
+              {
+                setid: "abc-123",
+                title: "METOPROLOL",
+                published_date: "2024-01-01",
+                spl_version: 1,
+              },
+            ],
+          }),
+      });
+      // getDrugLabel mock (XML)
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        text: () =>
+          Promise.resolve(`
+            <section>
+              <code code="34067-9" codeSystem="2.16.840.1.113883.6.1" />
+              <title>INDICATIONS</title>
+              <text>For treatment of hypertension.</text>
+            </section>
+          `),
+      });
+
+      const r1 = await getDrugEducation("metoprolol");
+      expect(r1).not.toBeNull();
+      expect(r1!.drug_name).toBe("metoprolol");
+      const callsAfterFirst = fetchMock.mock.calls.length;
+
+      const r2 = await getDrugEducation("metoprolol");
+      // No additional fetch calls should have been made
+      expect(fetchMock.mock.calls.length).toBe(callsAfterFirst);
+      expect(r2!.drug_name).toBe("metoprolol");
+    });
+
+    it("getDrugEducation caches null results for unknown drugs", async () => {
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ data: [] }),
+      });
+
+      const r1 = await getDrugEducation("zzzznotareal");
+      expect(r1).toBeNull();
+      const callsAfterFirst = fetchMock.mock.calls.length;
+
+      const r2 = await getDrugEducation("zzzznotareal");
+      expect(r2).toBeNull();
+      // Should not have made additional calls
+      expect(fetchMock.mock.calls.length).toBe(callsAfterFirst);
+    });
+
+    it("clearDailyMedCache forces re-fetch", async () => {
+      fetchMock.mockResolvedValue({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            data: [
+              {
+                setid: "abc-123",
+                title: "LISINOPRIL",
+                published_date: "2024-01-01",
+                spl_version: 1,
+              },
+            ],
+          }),
+      });
+
+      await searchDrug("lisinopril", 3);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+
+      clearDailyMedCache();
+
+      await searchDrug("lisinopril", 3);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    });
   });
 });

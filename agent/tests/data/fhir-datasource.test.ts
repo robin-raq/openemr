@@ -330,4 +330,107 @@ describe("FhirDataSource", () => {
     );
     consoleSpy.mockRestore();
   });
+
+  describe("FHIR data caching (60s TTL)", () => {
+    it("second getPatient call with same ID returns cached result without extra fetch", async () => {
+      // Setup: mock a full getPatient flow (token + resolver + 5 FHIR calls)
+      const patient = loadFixture("patient.json");
+      const conditions = loadFixture("condition-bundle.json");
+      const meds = loadFixture("medication-request-bundle.json");
+      const allergies = loadFixture("allergy-intolerance-bundle.json");
+      const vitals = loadFixture("vital-signs-bundle.json");
+
+      fetchMock.mockImplementation((url: string) => {
+        if (url.includes("oauth2") && url.includes("token")) {
+          return Promise.resolve({
+            ok: true,
+            json: () => Promise.resolve({ access_token: "tok", expires_in: 3600 }),
+          });
+        }
+        if (url.includes("/patient?pid=")) {
+          return Promise.resolve({
+            ok: true,
+            json: () => Promise.resolve({ uuid: "90cde167-511f-4f6d-bc97-b65a78cf1995" }),
+          });
+        }
+        if (url.includes("/Patient/")) {
+          return Promise.resolve({ ok: true, json: () => Promise.resolve(patient) });
+        }
+        if (url.includes("/Condition")) {
+          return Promise.resolve({ ok: true, json: () => Promise.resolve(conditions) });
+        }
+        if (url.includes("/MedicationRequest")) {
+          return Promise.resolve({ ok: true, json: () => Promise.resolve(meds) });
+        }
+        if (url.includes("/AllergyIntolerance")) {
+          return Promise.resolve({ ok: true, json: () => Promise.resolve(allergies) });
+        }
+        if (url.includes("/Observation")) {
+          return Promise.resolve({ ok: true, json: () => Promise.resolve(vitals) });
+        }
+        return Promise.resolve({ ok: false, status: 404, text: () => Promise.resolve("") });
+      });
+
+      const ds = new FhirDataSource(config);
+      const result1 = await ds.getPatient("1");
+      const callsAfterFirst = fetchMock.mock.calls.length;
+
+      const result2 = await ds.getPatient("1");
+      const callsAfterSecond = fetchMock.mock.calls.length;
+
+      // Second call should not have made any additional fetch calls
+      expect(callsAfterSecond).toBe(callsAfterFirst);
+      expect(result1).toEqual(result2);
+    });
+
+    it("clearCache() forces data to be re-fetched", async () => {
+      const patient = loadFixture("patient.json");
+      const conditions = loadFixture("condition-bundle.json");
+      const meds = loadFixture("medication-request-bundle.json");
+      const allergies = loadFixture("allergy-intolerance-bundle.json");
+      const vitals = loadFixture("vital-signs-bundle.json");
+
+      fetchMock.mockImplementation((url: string) => {
+        if (url.includes("oauth2") && url.includes("token")) {
+          return Promise.resolve({
+            ok: true,
+            json: () => Promise.resolve({ access_token: "tok", expires_in: 3600 }),
+          });
+        }
+        if (url.includes("/patient?pid=")) {
+          return Promise.resolve({
+            ok: true,
+            json: () => Promise.resolve({ uuid: "90cde167-511f-4f6d-bc97-b65a78cf1995" }),
+          });
+        }
+        if (url.includes("/Patient/")) {
+          return Promise.resolve({ ok: true, json: () => Promise.resolve(patient) });
+        }
+        if (url.includes("/Condition")) {
+          return Promise.resolve({ ok: true, json: () => Promise.resolve(conditions) });
+        }
+        if (url.includes("/MedicationRequest")) {
+          return Promise.resolve({ ok: true, json: () => Promise.resolve(meds) });
+        }
+        if (url.includes("/AllergyIntolerance")) {
+          return Promise.resolve({ ok: true, json: () => Promise.resolve(allergies) });
+        }
+        if (url.includes("/Observation")) {
+          return Promise.resolve({ ok: true, json: () => Promise.resolve(vitals) });
+        }
+        return Promise.resolve({ ok: false, status: 404, text: () => Promise.resolve("") });
+      });
+
+      const ds = new FhirDataSource(config);
+      await ds.getPatient("1");
+      const callsAfterFirst = fetchMock.mock.calls.length;
+
+      ds.clearCache();
+      await ds.getPatient("1");
+      const callsAfterSecond = fetchMock.mock.calls.length;
+
+      // After clearing cache, second call should have made new fetch calls
+      expect(callsAfterSecond).toBeGreaterThan(callsAfterFirst);
+    });
+  });
 });

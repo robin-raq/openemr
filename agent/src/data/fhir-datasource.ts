@@ -8,9 +8,15 @@ import {
 } from "./fhir-mappers";
 import { FhirAuthManager, FHIR_SCOPES } from "./fhir-auth";
 import { PatientIdResolver } from "./patient-id-resolver";
+import { TtlCache } from "../cache";
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const FHIR_TIMEOUT_MS = 10_000;
+
+/** TTL for FHIR data cache: 60 seconds. Patient data rarely changes within a clinical session. */
+const FHIR_CACHE_TTL_MS = 60_000;
+/** Max entries in the FHIR data cache. */
+const FHIR_CACHE_MAX_ENTRIES = 100;
 
 export interface FhirDataSourceConfig {
   fhirBaseUrl: string;
@@ -29,6 +35,10 @@ export class FhirDataSource implements DataSource {
   private fhirBaseUrl: string;
   private auth: FhirAuthManager;
   private resolver: PatientIdResolver;
+  private readonly cache = new TtlCache<unknown>({
+    ttlMs: FHIR_CACHE_TTL_MS,
+    maxEntries: FHIR_CACHE_MAX_ENTRIES,
+  });
 
   constructor(config: FhirDataSourceConfig) {
     this.fhirBaseUrl = config.fhirBaseUrl.replace(/\/$/, "");
@@ -46,6 +56,11 @@ export class FhirDataSource implements DataSource {
       apiBaseUrl: config.apiBaseUrl,
       getAccessToken: () => this.auth.getAccessToken(),
     });
+  }
+
+  /** Clear the FHIR data cache. Useful for testing or forced refresh. */
+  clearCache(): void {
+    this.cache.clear();
   }
 
   private async resolveUuid(pid: string): Promise<string> {
@@ -110,6 +125,10 @@ export class FhirDataSource implements DataSource {
   }
 
   async getPatient(id: string): Promise<PatientData> {
+    const cacheKey = `patient:${id}`;
+    const cached = this.cache.get(cacheKey) as PatientData | undefined;
+    if (cached) return cached;
+
     const uuid = await this.resolveUuid(id);
 
     const [patient, conditions, meds, allergies, vitals] = await Promise.all([
@@ -120,55 +139,87 @@ export class FhirDataSource implements DataSource {
       this.fhirFetch(`/Observation?patient=${uuid}&category=vital-signs&_sort=-date&_count=10`),
     ]);
 
-    return mapFhirPatient(id, patient as Parameters<typeof mapFhirPatient>[1], conditions as Parameters<typeof mapFhirPatient>[2], meds as Parameters<typeof mapFhirPatient>[3], allergies as Parameters<typeof mapFhirPatient>[4], vitals as Parameters<typeof mapFhirPatient>[5]);
+    const result = mapFhirPatient(id, patient as Parameters<typeof mapFhirPatient>[1], conditions as Parameters<typeof mapFhirPatient>[2], meds as Parameters<typeof mapFhirPatient>[3], allergies as Parameters<typeof mapFhirPatient>[4], vitals as Parameters<typeof mapFhirPatient>[5]);
+    this.cache.set(cacheKey, result);
+    return result;
   }
 
   async getMedications(patientId: string): Promise<MedicationData[]> {
+    const cacheKey = `medications:${patientId}`;
+    const cached = this.cache.get(cacheKey) as MedicationData[] | undefined;
+    if (cached) return cached;
+
     const uuid = await this.resolveUuid(patientId);
 
     const bundle = await this.fhirFetch(
       `/MedicationRequest?patient=${uuid}&status=active&_count=100`
     );
 
-    return mapFhirMedications(bundle as Parameters<typeof mapFhirMedications>[0]);
+    const result = mapFhirMedications(bundle as Parameters<typeof mapFhirMedications>[0]);
+    this.cache.set(cacheKey, result);
+    return result;
   }
 
   async getLabResults(patientId: string): Promise<LabResult[]> {
+    const cacheKey = `labs:${patientId}`;
+    const cached = this.cache.get(cacheKey) as LabResult[] | undefined;
+    if (cached) return cached;
+
     const uuid = await this.resolveUuid(patientId);
 
     const bundle = await this.fhirFetch(
       `/Observation?patient=${uuid}&category=laboratory&_sort=-date&_count=50`
     );
 
-    return mapFhirLabResults(bundle as Parameters<typeof mapFhirLabResults>[0]);
+    const result = mapFhirLabResults(bundle as Parameters<typeof mapFhirLabResults>[0]);
+    this.cache.set(cacheKey, result);
+    return result;
   }
 
   async getEncounters(patientId: string): Promise<EncounterData[]> {
+    const cacheKey = `encounters:${patientId}`;
+    const cached = this.cache.get(cacheKey) as EncounterData[] | undefined;
+    if (cached) return cached;
+
     const uuid = await this.resolveUuid(patientId);
 
     const bundle = await this.fhirFetch(
       `/Encounter?patient=${uuid}&_sort=-date&_count=50`
     );
 
-    return mapFhirEncounters(patientId, bundle as Parameters<typeof mapFhirEncounters>[1]);
+    const result = mapFhirEncounters(patientId, bundle as Parameters<typeof mapFhirEncounters>[1]);
+    this.cache.set(cacheKey, result);
+    return result;
   }
 
   async getAdmissionMedications(encounterId: string): Promise<AdmissionMedication[]> {
+    const cacheKey = `admissionMeds:${encounterId}`;
+    const cached = this.cache.get(cacheKey) as AdmissionMedication[] | undefined;
+    if (cached) return cached;
+
     const bundle = await this.fhirFetch(
       `/MedicationRequest?encounter=${encounterId}&_count=100`
     );
 
-    return mapFhirAdmissionMedications(bundle as Parameters<typeof mapFhirAdmissionMedications>[0]);
+    const result = mapFhirAdmissionMedications(bundle as Parameters<typeof mapFhirAdmissionMedications>[0]);
+    this.cache.set(cacheKey, result);
+    return result;
   }
 
   async getAppointments(patientId: string): Promise<Appointment[]> {
+    const cacheKey = `appointments:${patientId}`;
+    const cached = this.cache.get(cacheKey) as Appointment[] | undefined;
+    if (cached) return cached;
+
     const uuid = await this.resolveUuid(patientId);
 
     const bundle = await this.fhirFetch(
       `/Appointment?patient=${uuid}&status=booked,arrived,checked-in,pending&_sort=date&_count=50`
     );
 
-    return mapFhirAppointments(patientId, bundle as Parameters<typeof mapFhirAppointments>[1]);
+    const result = mapFhirAppointments(patientId, bundle as Parameters<typeof mapFhirAppointments>[1]);
+    this.cache.set(cacheKey, result);
+    return result;
   }
 
   // --- Document CRUD via FHIR DocumentReference ---
