@@ -64,6 +64,43 @@ const TARGETS = {
   rubric_overall_avg: 3.5,     // Cookbook Stage 4: average rubric score threshold
 };
 
+// ─── Concurrency Limiter ─────────────────────────────────────────────
+
+const DEFAULT_EVAL_CONCURRENCY = 3;
+const EVAL_TASK_DELAY_MS = 200;
+
+/**
+ * Run async tasks with bounded concurrency and a stagger delay.
+ * No external dependencies — uses a simple semaphore pattern.
+ *
+ * @param tasks  Array of zero-arg async functions to execute
+ * @param limit  Max tasks running simultaneously (default: 3)
+ * @param delayMs  Delay between starting new tasks to avoid API throttling (default: 200ms)
+ * @returns  Array of results in the same order as the input tasks
+ */
+async function runWithConcurrency<T>(
+  tasks: Array<() => Promise<T>>,
+  limit: number = DEFAULT_EVAL_CONCURRENCY,
+  delayMs: number = EVAL_TASK_DELAY_MS,
+): Promise<T[]> {
+  const results: T[] = new Array(tasks.length);
+  let nextIndex = 0;
+
+  async function worker(): Promise<void> {
+    while (nextIndex < tasks.length) {
+      const idx = nextIndex++;
+      if (idx > 0) {
+        await new Promise((r) => setTimeout(r, delayMs));
+      }
+      results[idx] = await tasks[idx]();
+    }
+  }
+
+  const workers = Array.from({ length: Math.min(limit, tasks.length) }, () => worker());
+  await Promise.all(workers);
+  return results;
+}
+
 // ─── CLI Flags ──────────────────────────────────────────────────────
 
 const args = process.argv.slice(2);
@@ -73,6 +110,8 @@ const verbose = args.includes("--verbose") || args.includes("-v");
 const filterCategory = args.find((a) => a.startsWith("--category="))?.split("=")[1];
 const filterDifficulty = args.find((a) => a.startsWith("--difficulty="))?.split("=")[1];
 const filterIdArg = args.find((a) => a.startsWith("--id="))?.split("=")[1];
+const concurrencyArg = args.find((a) => a.startsWith("--concurrency="))?.split("=")[1];
+const evalConcurrency = concurrencyArg ? parseInt(concurrencyArg, 10) : DEFAULT_EVAL_CONCURRENCY;
 
 // ─── Assertion Helpers ──────────────────────────────────────────────
 
@@ -261,20 +300,31 @@ async function runEval() {
     console.log("🔬 LLM-as-judge rubric scoring ENABLED (--rubric)\n");
   }
 
-  const results: EvalResult[] = [];
   let passed = 0;
   let skipped = 0;
   const suiteStart = Date.now();
 
-  for (const tc of cases) {
+  // Shared flag: set to true on fatal API errors to abort remaining tasks
+  let abortEarly = false;
+
+  // ── Single case executor (extracted for concurrency) ──
+  async function runSingleCase(tc: TestCase): Promise<EvalResult> {
     // Skip previously passed cases in resume mode
     if (skipIds.has(tc.id)) {
-      const prev = previousResults.find((r) => r.id === tc.id)!;
-      results.push(prev);
-      passed++;
-      skipped++;
       console.log(`⏭️  ${tc.id}: SKIP (previously passed)`);
-      continue;
+      const prev = previousResults.find((r) => r.id === tc.id)!;
+      return prev;
+    }
+
+    // If a fatal API error was detected, skip remaining cases
+    if (abortEarly) {
+      return {
+        id: tc.id, pass: false, failures: ["aborted: fatal API error in earlier case"],
+        tools_used: [], duration_ms: 0, tool_count: 0, safety_alerts: [],
+        has_hallucination: false, has_source_citation: false, has_disclaimer: false,
+        verification_correct: false, no_tool_violation: false,
+        category: tc.category, subcategory: tc.subcategory, difficulty: tc.difficulty,
+      };
     }
 
     const failures: string[] = [];
@@ -414,9 +464,8 @@ async function runEval() {
       }
 
       const pass = failures.length === 0;
-      if (pass) passed++;
 
-      results.push({
+      const evalResult: EvalResult = {
         id: tc.id,
         pass,
         failures,
@@ -434,7 +483,7 @@ async function runEval() {
         difficulty: tc.difficulty,
         rubric: rubricResult,
         rubric_quality_gate: rubricQualityGate,
-      });
+      };
 
       const tag = ` [${category}/${tc.subcategory || "general"}]`;
       const rubricTag = rubricResult && rubricResult.overall_score >= 0
@@ -442,19 +491,21 @@ async function runEval() {
         : "";
       console.log(`${pass ? "✅" : "❌"} ${tc.id}${tag}: ${pass ? "PASS" : failures.join("; ")} (${(duration_ms / 1000).toFixed(1)}s)${rubricTag}`);
 
+      return evalResult;
+
     } catch (err) {
       const duration_ms = Date.now() - start;
       const errMsg = err instanceof Error ? err.message : String(err);
 
-      // Detect credit/API errors and stop early
+      // Detect credit/API errors and signal abort for remaining tasks
       if (errMsg.includes("credit balance is too low") || errMsg.includes("rate_limit")) {
         console.error(`\n⚠️  API error: ${errMsg.substring(0, 100)}`);
-        console.error(`Stopping eval at case ${results.length + 1}/${cases.length} — resolve API issue and re-run with --resume.`);
-        break;
+        console.error(`Aborting remaining cases — resolve API issue and re-run with --resume.`);
+        abortEarly = true;
       }
 
       failures.push(errMsg);
-      results.push({
+      const evalResult: EvalResult = {
         id: tc.id,
         pass: false,
         failures,
@@ -470,9 +521,22 @@ async function runEval() {
         category: tc.category,
         subcategory: tc.subcategory,
         difficulty: tc.difficulty,
-      });
+      };
       console.log(`❌ ${tc.id}: ERROR - ${failures[0]} (${(duration_ms / 1000).toFixed(1)}s)`);
+      return evalResult;
     }
+  }
+
+  // ── Run eval cases concurrently (default: 3 at a time, 200ms stagger) ──
+  console.log(`\n⚡ Running ${cases.length} eval cases with concurrency=${evalConcurrency}\n`);
+
+  const tasks = cases.map((tc) => () => runSingleCase(tc));
+  const results = await runWithConcurrency(tasks, evalConcurrency, EVAL_TASK_DELAY_MS);
+
+  // Compute pass/skip counts from results
+  for (const r of results) {
+    if (r.pass) passed++;
+    if (skipIds.has(r.id)) skipped++;
   }
 
   const totalDuration = Date.now() - suiteStart;

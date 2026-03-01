@@ -33,3 +33,4 @@ npm-debug.log*
 
 # session persistence (local data)
 data/sessions.json
+data/feedback.json
