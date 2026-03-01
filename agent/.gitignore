@@ -30,3 +30,6 @@ npm-debug.log*
 # runtime
 *.pid
 *.seed
+
+# session persistence (local data)
+data/sessions.json
