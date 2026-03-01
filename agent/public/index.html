@@ -208,6 +208,17 @@
       cursor: pointer;
     }
     .patient-selector select option { color: #1e293b; background: white; }
+    .patient-selector select.locked {
+      opacity: 0.7;
+      pointer-events: none;
+      border-color: rgba(255,255,255,0.15);
+    }
+    .patient-lock-hint {
+      font-size: 0.625rem;
+      color: rgba(255,255,255,0.6);
+      margin-left: 0.25rem;
+      cursor: help;
+    }
 
     #quick-prompts {
       padding: 0.75rem 1.5rem;
@@ -282,6 +293,44 @@
       0%, 100% { border-color: rgba(255,255,255,0.3); box-shadow: none; }
       50% { border-color: #ef4444; box-shadow: 0 0 0 2px rgba(239, 68, 68, 0.3); }
     }
+
+    .patient-switch-notice {
+      background: #eff6ff;
+      border: 1px solid #3b82f6;
+      border-radius: 8px;
+      padding: 0.625rem 0.875rem;
+      margin: 0.5rem 0;
+      font-size: 0.8125rem;
+      color: #1e40af;
+      max-width: 800px;
+      align-self: center;
+    }
+    .patient-switch-notice strong { color: #1e3a8a; }
+    .patient-switch-actions {
+      display: flex;
+      gap: 0.5rem;
+      margin-top: 0.5rem;
+    }
+    .patient-switch-btn {
+      padding: 0.375rem 0.75rem;
+      border-radius: 6px;
+      font-size: 0.75rem;
+      font-family: inherit;
+      font-weight: 500;
+      cursor: pointer;
+      border: none;
+    }
+    .patient-switch-btn.primary {
+      background: #2563eb;
+      color: white;
+    }
+    .patient-switch-btn.primary:hover { background: #1d4ed8; }
+    .patient-switch-btn.secondary {
+      background: white;
+      color: #475569;
+      border: 1px solid #cbd5e1;
+    }
+    .patient-switch-btn.secondary:hover { background: #f1f5f9; }
 
     #chat-container {
       flex: 1;
@@ -543,6 +592,9 @@
       display: flex;
       align-items: center;
       justify-content: space-between;
+      position: sticky;
+      top: 0;
+      z-index: 10;
     }
     .obs-header-title { display: flex; align-items: center; gap: 0.5rem; }
     .obs-close {
@@ -1414,11 +1466,15 @@
   <script>
     // Session persistence: reuse session_id across page reloads via localStorage
     const SESSION_KEY = 'agentforge_session_id';
+    const PENDING_SEND_KEY = 'agentforge_pending_send';
     const sessionId = localStorage.getItem(SESSION_KEY) || 'session-' + crypto.randomUUID();
     localStorage.setItem(SESSION_KEY, sessionId);
 
-    // --- Observability Tracker (persisted to localStorage per session) ---
-    const OBS_STORAGE_KEY = 'agentforge_obs_' + sessionId;
+    // Track which patient this chat is for — used to recommend new chat when switching patients
+    let patientIdForThisChat = null;
+
+    // --- Observability Tracker (persisted globally — only clears on explicit user action) ---
+    const OBS_STORAGE_KEY = 'agentforge_obs_global';
 
     const obsTracker = {
       requests: 0,
@@ -1869,7 +1925,78 @@
       }
     }
 
-    patientSelect.addEventListener('change', updatePatientContext);
+    // Lock/unlock the patient dropdown — one patient per chat session
+    function lockPatientDropdown() {
+      patientSelect.classList.add('locked');
+      var hint = document.getElementById('patient-lock-hint');
+      if (!hint) {
+        hint = document.createElement('span');
+        hint.id = 'patient-lock-hint';
+        hint.className = 'patient-lock-hint';
+        hint.textContent = '(locked)';
+        hint.title = 'Patient is locked for this chat. Click New Chat to switch patients.';
+        patientSelect.parentElement.appendChild(hint);
+      }
+      hint.style.display = 'inline';
+    }
+    function unlockPatientDropdown() {
+      patientSelect.classList.remove('locked');
+      var hint = document.getElementById('patient-lock-hint');
+      if (hint) hint.style.display = 'none';
+    }
+
+    patientSelect.addEventListener('change', function() {
+      // If chat has messages, block the change and show switch prompt
+      var userMsgCount = chatContainer.querySelectorAll('.message.user').length;
+      if (userMsgCount > 0 && patientIdForThisChat && patientSelect.value !== patientIdForThisChat) {
+        var newPid = patientSelect.value;
+        var newName = PATIENT_INFO[newPid]?.name || 'selected patient';
+        var prevName = PATIENT_INFO[patientIdForThisChat]?.name || 'current patient';
+        // Revert the dropdown
+        patientSelect.value = patientIdForThisChat;
+        // Show the switch prompt in chat
+        var oldNotice = document.querySelector('.patient-switch-notice');
+        if (oldNotice) oldNotice.remove();
+        var notice = document.createElement('div');
+        notice.className = 'patient-switch-notice';
+        // Check if there's a previous chat for the new patient
+        var prevChat = getChatIndex().find(function(e) { return e.patient_id === newPid && e.id !== sessionId; });
+        var resumeBtn = prevChat
+          ? '<button class="patient-switch-btn secondary" data-action="resume">Resume chat: "' + escapeHtml(prevChat.title.slice(0, 30)) + '"</button>'
+          : '';
+        notice.innerHTML = '<div>\u2139\uFE0F This chat is for <strong>' + escapeHtml(prevName) +
+          '</strong>. To query <strong>' + escapeHtml(newName) +
+          '</strong>, start a new chat to keep patient data separate.</div>' +
+          '<div class="patient-switch-actions">' +
+          '<button class="patient-switch-btn primary" data-action="new-chat">New Chat for ' + escapeHtml(newName) + '</button>' +
+          resumeBtn +
+          '<button class="patient-switch-btn secondary" data-action="dismiss">Stay with ' + escapeHtml(prevName) + '</button>' +
+          '</div>';
+        chatContainer.appendChild(notice);
+        scrollToBottom();
+        notice.querySelector('[data-action="new-chat"]').addEventListener('click', function() {
+          notice.remove();
+          saveChatToHistory();
+          try {
+            localStorage.setItem(PATIENT_ID_KEY, newPid);
+            localStorage.removeItem(SESSION_KEY);
+          } catch (e) {}
+          window.location.reload();
+        });
+        if (prevChat) {
+          notice.querySelector('[data-action="resume"]').addEventListener('click', function() {
+            notice.remove();
+            saveChatToHistory();
+            loadChatFromHistory(prevChat.id);
+          });
+        }
+        notice.querySelector('[data-action="dismiss"]').addEventListener('click', function() {
+          notice.remove();
+        });
+        return;
+      }
+      updatePatientContext();
+    });
 
     (function initFromUrl() {
       const params = new URLSearchParams(window.location.search);
@@ -2377,7 +2504,7 @@
     async function send(overrideMsg) {
       const msg = (overrideMsg || messageInput.value).trim();
       if (!msg) return;
-      // Require patient selection
+      // Require patient selection — dropdown is the single source of truth for patient context
       if (!patientSelect.value) {
         showPatientRequired();
         return;
@@ -2385,6 +2512,8 @@
       messageInput.value = '';
       messageInput.style.height = 'auto';
       addMessage('user', msg);
+      patientIdForThisChat = patientSelect.value;
+      lockPatientDropdown();
       sendBtn.disabled = true;
       messageInput.disabled = true;
       setThinking(true);
@@ -2468,10 +2597,31 @@
           }
           // Ensure scroll to bottom after all messages restored
           scrollToBottom();
+          // This chat has messages — set patient context from index or current selection
+          const entry = getChatIndex().find(function(e) { return e.id === sessionId; });
+          patientIdForThisChat = (entry && entry.patient_id) ? entry.patient_id : (patientSelect.value || null);
+          if (patientIdForThisChat) lockPatientDropdown();
         }
       } catch { /* ignore — fresh session */ }
     }
-    restoreHistory();
+    restoreHistory().then(function() {
+      // If user chose "Start new chat" from a different-patient warning, send the pending message
+      try {
+        const raw = localStorage.getItem(PENDING_SEND_KEY);
+        if (raw) {
+          localStorage.removeItem(PENDING_SEND_KEY);
+          const pending = JSON.parse(raw);
+          if (pending.message && pending.patient_id) {
+            patientSelect.value = pending.patient_id;
+            try { localStorage.setItem(PATIENT_ID_KEY, pending.patient_id); } catch (_) {}
+            patientSelect.dispatchEvent(new Event('change'));
+            patientIdForThisChat = pending.patient_id;
+            lockPatientDropdown();
+            send(pending.message);
+          }
+        }
+      } catch { /* ignore */ }
+    });
 
     // Display session ID in observability sidebar (truncated for readability)
     document.getElementById('obs-session-id').textContent = sessionId.length > 16 ? sessionId.slice(0, 16) + '...' : sessionId;
@@ -2630,9 +2780,9 @@
     });
 
     // New Chat button — save current chat, then clear session and start fresh
+    // Observability is not cleared here; only when user explicitly hits Clear
     document.getElementById('new-chat-btn').addEventListener('click', () => {
       saveChatToHistory();
-      localStorage.removeItem(OBS_STORAGE_KEY);
       localStorage.removeItem(SESSION_KEY);
       window.location.reload();
     });
