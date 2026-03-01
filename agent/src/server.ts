@@ -1,9 +1,11 @@
 import express from "express";
 import cors from "cors";
+import compression from "compression";
 import path from "path";
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
-import { chat } from "./agent";
+import { chat, chatStream } from "./agent";
 import type { ChatResult } from "./agent";
 import { PORT, getLangfuseCallbacks, initLangfuse, warnInsecureTls, getDataSource } from "./config";
 import type { DataSource } from "./data/datasource";
@@ -99,6 +101,15 @@ export interface ChatResponsePayload {
   response: string;
   tool_calls: ChatResult["toolCalls"];
   verification_flags: string[];
+  reasoning_steps: string[];
+  token_usage: {
+    input_tokens: number;
+    output_tokens: number;
+    total_tokens: number;
+    cache_read_tokens: number;
+    cache_creation_tokens: number;
+    estimated_cost_usd: number;
+  };
   timing: {
     total_ms: number;
     llm_ms: number;
@@ -114,7 +125,12 @@ export interface ChatResponsePayload {
     latency_ms: number;
     llm_inference_ms: number;
     tool_execution_ms: number;
-    verification: Record<string, unknown>;
+    /** Only present for responses with safety alerts OR confidence < 0.7 */
+    verification?: Record<string, unknown>;
+    /** Minimal flag for healthy responses (confidence >= 0.7, no safety alerts) */
+    has_sources?: boolean;
+    /** Minimal data_sources list for healthy responses */
+    data_sources?: string[];
   };
   performance: {
     query_type: string;
@@ -164,10 +180,75 @@ export function buildChatResponse(result: ChatResult): ChatResponsePayload {
     isComprehensiveReport,
   });
 
+  // Claude Sonnet 4 pricing: $3/M input, $15/M output
+  const tu = result.tokenUsage;
+  const estimatedCostUsd = parseFloat(((tu.input_tokens * 3 + tu.output_tokens * 15) / 1_000_000).toFixed(6));
+
+  // Perf optimization: for "healthy" responses (confidence >= 0.7, no safety alerts),
+  // emit a minimal structured_result without the heavy verification breakdown.
+  const isHealthy = confidence.score >= 0.7 && result.safetyAlerts.length === 0;
+
+  const structuredBase = {
+    tools_called: toolNames,
+    confidence_score: confidence.score,
+    sources,
+    trace_id: randomUUID().slice(0, 12),
+    latency_ms: result.durationMs,
+    llm_inference_ms: llmInferenceMs,
+    tool_execution_ms: toolSumMs,
+  };
+
+  const structured_result: ChatResponsePayload["structured_result"] = isHealthy
+    ? {
+        ...structuredBase,
+        has_sources: hasSources,
+        data_sources: sources,
+      }
+    : {
+        ...structuredBase,
+        verification: {
+          has_sources: hasSources,
+          has_disclaimer: hasDisclaimer,
+          confidence: confidence.score,
+          flags: result.safetyAlerts,
+          needs_escalation: hasEscalation,
+          hallucination_risk: hasScopeWarning ? 1 : 0,
+          domain_violations: hasScopeWarning ? ["scope_warning"] : [],
+          output_valid: !hasScopeWarning,
+          verification_checks: {
+            hallucination_detection: !hasScopeWarning,
+            source_grounding: hasSources,
+            domain_constraints: !hasScopeWarning,
+            output_validation: true,
+            confidence_scoring: true,
+          },
+          verification_details: {
+            hallucination_risk: hasScopeWarning ? 1 : 0,
+            confidence_breakdown: confidence.breakdown,
+            domain_violations: hasScopeWarning ? ["scope_warning"] : [],
+            emergency_detected: hasEscalation,
+            sources_found: hasSources,
+            source_grounding_pass: hasSources,
+            output_warnings: result.safetyAlerts.filter((a) => /SCOPE WARNING/i.test(a)),
+            checks_passed: [!hasScopeWarning, hasSources, !hasScopeWarning, true, true].filter(Boolean).length,
+            checks_total: 5,
+          },
+        },
+      };
+
   return {
     response: result.response,
     tool_calls: result.toolCalls,
     verification_flags: result.safetyAlerts,
+    reasoning_steps: result.reasoningSteps,
+    token_usage: {
+      input_tokens: tu.input_tokens,
+      output_tokens: tu.output_tokens,
+      total_tokens: tu.total_tokens,
+      cache_read_tokens: tu.cache_read_tokens,
+      cache_creation_tokens: tu.cache_creation_tokens,
+      estimated_cost_usd: estimatedCostUsd,
+    },
     timing: {
       total_ms: result.durationMs,
       llm_ms: llmInferenceMs,
@@ -175,43 +256,7 @@ export function buildChatResponse(result: ChatResult): ChatResponsePayload {
       tool_count: toolCount,
       tool_traces: result.toolTraces,
     },
-    structured_result: {
-      tools_called: toolNames,
-      confidence_score: confidence.score,
-      sources,
-      trace_id: randomUUID().slice(0, 12),
-      latency_ms: result.durationMs,
-      llm_inference_ms: llmInferenceMs,
-      tool_execution_ms: toolSumMs,
-      verification: {
-        has_sources: hasSources,
-        has_disclaimer: hasDisclaimer,
-        confidence: confidence.score,
-        flags: result.safetyAlerts,
-        needs_escalation: hasEscalation,
-        hallucination_risk: hasScopeWarning ? 1 : 0,
-        domain_violations: hasScopeWarning ? ["scope_warning"] : [],
-        output_valid: !hasScopeWarning,
-        verification_checks: {
-          hallucination_detection: !hasScopeWarning,
-          source_grounding: hasSources,
-          domain_constraints: !hasScopeWarning,
-          output_validation: true,
-          confidence_scoring: true,
-        },
-        verification_details: {
-          hallucination_risk: hasScopeWarning ? 1 : 0,
-          confidence_breakdown: confidence.breakdown,
-          domain_violations: hasScopeWarning ? ["scope_warning"] : [],
-          emergency_detected: hasEscalation,
-          sources_found: hasSources,
-          source_grounding_pass: hasSources,
-          output_warnings: result.safetyAlerts.filter((a) => /SCOPE WARNING/i.test(a)),
-          checks_passed: [!hasScopeWarning, hasSources, !hasScopeWarning, true, true].filter(Boolean).length,
-          checks_total: 5,
-        },
-      },
-    },
+    structured_result,
     performance: {
       query_type: isMultiStep ? "multi_step" : isSingleTool ? "single_tool" : "zero_or_two_tool",
       tool_count: toolCount,
@@ -341,10 +386,11 @@ export function evictOldSessions(): void {
 // --- Disk persistence for session history ---
 const SESSIONS_FILE = path.join(__dirname, "../data/sessions.json");
 
-export function loadSessionsFromDisk(): void {
+export async function loadSessionsFromDisk(): Promise<void> {
   try {
     if (existsSync(SESSIONS_FILE)) {
-      const data = JSON.parse(readFileSync(SESSIONS_FILE, "utf-8"));
+      const raw = await readFile(SESSIONS_FILE, "utf-8");
+      const data = JSON.parse(raw);
       for (const [id, session] of Object.entries(data)) {
         sessionHistory.set(id, session as { entries: HistoryEntry[]; lastAccess: number });
       }
@@ -390,6 +436,16 @@ export function createApp(): express.Express {
   if (allowedOrigins.length > 0) {
     app.use(cors({ origin: allowedOrigins, credentials: true }));
   }
+
+  // Gzip/brotli compression for all HTTP responses (reduces JSON payload sizes).
+  // Skip compression for SSE streams — chunked encoding breaks with buffered compression.
+  app.use(compression({
+    filter: (req, res) => {
+      if (req.path === "/api/chat/stream") return false;
+      return compression.filter(req, res);
+    },
+  }));
+
   app.use(express.json({ limit: "50kb" }));
 
   // Validate Content-Type on POST/PUT requests
@@ -520,6 +576,25 @@ export function createApp(): express.Express {
       const result = await chat(effectiveMessage, sessionId, history, callbacks);
       await flushLangfuse(callbacks);
 
+      // SEC-005: Enforce patient scope — if a patient_id was provided, flag any tool
+      // calls that used a different patient_id as a safety violation.
+      if (patient_id && typeof patient_id === "string" && patient_id.trim() !== "") {
+        const scopedPid = patient_id.trim();
+        for (const tc of result.toolCalls) {
+          const args = tc.args as Record<string, unknown> | undefined;
+          const toolPid = args?.patient_id ?? args?.pid;
+          if (toolPid != null && String(toolPid) !== scopedPid) {
+            // Agent queried the wrong patient — add safety alert and replace response
+            result.safetyAlerts.push(
+              `PATIENT SCOPE VIOLATION: Tool "${tc.name}" was called with patient ${toolPid} but the active patient is ${scopedPid}. Results may be for the wrong patient.`
+            );
+            result.response =
+              `I can only look up information for the currently selected patient (Patient ${scopedPid}). Please start a new chat to query a different patient.`;
+            break;
+          }
+        }
+      }
+
       // chat() mutates history with user + assistant messages
       setSessionHistory(sessionId, history);
       evictOldSessions();
@@ -534,7 +609,146 @@ export function createApp(): express.Express {
     }
   });
 
-  // Feedback endpoint
+  // --- Streaming chat endpoint (SSE) ---
+  app.post("/api/chat/stream", async (req, res) => {
+    try {
+      const { message, session_id, patient_id } = req.body;
+      if (!message || typeof message !== "string") {
+        res.status(400).json({ error: "message is required" });
+        return;
+      }
+      if (message.length > MAX_MESSAGE_LENGTH) {
+        res.status(400).json({
+          error: `Message too long. Maximum ${MAX_MESSAGE_LENGTH} characters.`,
+        });
+        return;
+      }
+      if (session_id && !SESSION_ID_REGEX.test(session_id)) {
+        res.status(400).json({ error: "Invalid session_id format." });
+        return;
+      }
+      const sessionId = session_id || randomUUID();
+
+      const rateLimitKey = req.ip || sessionId;
+      if (!rateLimit(rateLimitKey)) {
+        res.status(429).json({ error: "Rate limit exceeded. Try again in a minute." });
+        return;
+      }
+
+      let effectiveMessage = message;
+      if (patient_id && typeof patient_id === "string" && patient_id.trim() !== "") {
+        if (!PATIENT_ID_REGEX.test(patient_id.trim())) {
+          res.status(400).json({ error: "Invalid patient_id format." });
+          return;
+        }
+        effectiveMessage = `[Context: Currently viewing patient ${patient_id.trim()}]\n\n${message}`;
+      }
+      if (detectInjection(message)) {
+        effectiveMessage = INJECTION_REINFORCEMENT + effectiveMessage;
+      }
+
+      const history = getSessionHistory(sessionId);
+      const callbacks = getLangfuseCallbacks(sessionId);
+
+      // SSE headers
+      res.setHeader("Content-Type", "text/event-stream");
+      res.setHeader("Cache-Control", "no-cache");
+      res.setHeader("Connection", "keep-alive");
+      res.setHeader("X-Accel-Buffering", "no");
+      res.flushHeaders();
+
+      const sendSSE = (eventType: string, data: unknown): void => {
+        if (!res.destroyed) {
+          res.write(`event: ${eventType}\ndata: ${JSON.stringify(data)}\n\n`);
+        }
+      };
+
+      const stream = chatStream(effectiveMessage, sessionId, history, callbacks);
+
+      for await (const event of stream) {
+        if (res.destroyed) break;
+
+        switch (event.type) {
+          case "token":
+            sendSSE("token", { content: event.content });
+            break;
+          case "tool_start":
+            sendSSE("tool_start", { tool: event.tool });
+            break;
+          case "tool_end":
+            sendSSE("tool_end", { tool: event.tool, duration_ms: event.duration_ms });
+            break;
+          case "done": {
+            const result = event.result;
+
+            // SEC-005: Patient scope enforcement
+            if (patient_id && typeof patient_id === "string" && patient_id.trim() !== "") {
+              const scopedPid = patient_id.trim();
+              for (const tc of result.toolCalls) {
+                const args = tc.args as Record<string, unknown> | undefined;
+                const toolPid = args?.patient_id ?? args?.pid;
+                if (toolPid != null && String(toolPid) !== scopedPid) {
+                  result.safetyAlerts.push(
+                    `PATIENT SCOPE VIOLATION: Tool "${tc.name}" was called with patient ${toolPid} but the active patient is ${scopedPid}. Results may be for the wrong patient.`
+                  );
+                  result.response =
+                    `I can only look up information for the currently selected patient (Patient ${scopedPid}). Please start a new chat to query a different patient.`;
+                  break;
+                }
+              }
+            }
+
+            setSessionHistory(sessionId, history);
+            evictOldSessions();
+            schedulePersist();
+            await flushLangfuse(callbacks);
+
+            sendSSE("done", buildChatResponse(result));
+            break;
+          }
+          case "error":
+            sendSSE("error", { message: event.message });
+            break;
+        }
+      }
+    } catch (err) {
+      console.error("Stream endpoint error:", err);
+      if (!res.headersSent) {
+        res.status(500).json({
+          error: "An error occurred processing your request.",
+        });
+      } else if (!res.destroyed) {
+        res.write(`event: error\ndata: ${JSON.stringify({ message: "An error occurred processing your request." })}\n\n`);
+      }
+    } finally {
+      if (!res.destroyed) {
+        res.end();
+      }
+    }
+  });
+
+  // Feedback endpoint — persists to data/feedback.json
+  const FEEDBACK_FILE = path.join(__dirname, "../data/feedback.json");
+
+  function loadFeedback(): Array<Record<string, unknown>> {
+    try {
+      if (existsSync(FEEDBACK_FILE)) {
+        return JSON.parse(readFileSync(FEEDBACK_FILE, "utf-8"));
+      }
+    } catch { /* corrupt file — start fresh */ }
+    return [];
+  }
+
+  function saveFeedback(entries: Array<Record<string, unknown>>): void {
+    try {
+      const dir = path.dirname(FEEDBACK_FILE);
+      if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+      writeFileSync(FEEDBACK_FILE, JSON.stringify(entries, null, 2), "utf-8");
+    } catch (err) {
+      console.error("Failed to save feedback:", err);
+    }
+  }
+
   app.post("/api/feedback", (req, res) => {
     const { session_id, message_index, rating, comment } = req.body;
     if (!session_id || typeof session_id !== "string") {
@@ -545,8 +759,22 @@ export function createApp(): express.Express {
       res.status(404).json({ error: "Unknown session" });
       return;
     }
-    console.log("Feedback received:", { session_id, message_index, rating, comment });
+    const entry = {
+      session_id,
+      message_index,
+      rating,
+      comment: comment || null,
+      timestamp: new Date().toISOString(),
+    };
+    console.log("Feedback received:", entry);
+    const all = loadFeedback();
+    all.push(entry);
+    saveFeedback(all);
     res.json({ status: "ok" });
+  });
+
+  app.get("/api/feedback", (_req, res) => {
+    res.json(loadFeedback());
   });
 
   // SEC-003: Document ID validation helper
@@ -626,40 +854,42 @@ export function createApp(): express.Express {
 
 // Only start listening when run directly (not imported by tests)
 if (!process.env.VITEST) {
-  warnInsecureTls();
-  initLangfuse();
-  loadSessionsFromDisk();
-  const app = createApp();
-  const server = app.listen(PORT, "0.0.0.0", () => {
-    console.log(`OpenEMR Clinical Query Agent running on http://localhost:${PORT}`);
-  });
-
-  // Graceful shutdown: persist sessions and close server on SIGTERM/SIGINT
-  function gracefulShutdown(signal: string) {
-    console.log(`${signal} received. Shutting down gracefully...`);
-    server.close(() => {
-      // Persist sessions to disk synchronously before exit
-      try {
-        const sessionsObj: Record<string, unknown> = {};
-        for (const [id, session] of sessionHistory) sessionsObj[id] = session;
-        const dir = path.dirname(SESSIONS_FILE);
-        if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-        writeFileSync(SESSIONS_FILE, JSON.stringify(sessionsObj), "utf-8");
-        console.log(`Sessions persisted to disk (${sessionHistory.size} sessions).`);
-      } catch (err) {
-        console.warn("Failed to persist sessions on shutdown:", err);
-      }
-      console.log("Server closed.");
-      process.exit(0);
+  (async () => {
+    warnInsecureTls();
+    initLangfuse();
+    await loadSessionsFromDisk();
+    const app = createApp();
+    const server = app.listen(PORT, "0.0.0.0", () => {
+      console.log(`OpenEMR Clinical Query Agent running on http://localhost:${PORT}`);
     });
 
-    // Force exit if graceful shutdown hangs
-    setTimeout(() => {
-      console.error("Forceful shutdown after 10s timeout.");
-      process.exit(1);
-    }, 10_000);
-  }
+    // Graceful shutdown: persist sessions and close server on SIGTERM/SIGINT
+    function gracefulShutdown(signal: string) {
+      console.log(`${signal} received. Shutting down gracefully...`);
+      server.close(() => {
+        // Persist sessions to disk synchronously before exit
+        try {
+          const sessionsObj: Record<string, unknown> = {};
+          for (const [id, session] of sessionHistory) sessionsObj[id] = session;
+          const dir = path.dirname(SESSIONS_FILE);
+          if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+          writeFileSync(SESSIONS_FILE, JSON.stringify(sessionsObj), "utf-8");
+          console.log(`Sessions persisted to disk (${sessionHistory.size} sessions).`);
+        } catch (err) {
+          console.warn("Failed to persist sessions on shutdown:", err);
+        }
+        console.log("Server closed.");
+        process.exit(0);
+      });
 
-  process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
-  process.on("SIGINT", () => gracefulShutdown("SIGINT"));
+      // Force exit if graceful shutdown hangs
+      setTimeout(() => {
+        console.error("Forceful shutdown after 10s timeout.");
+        process.exit(1);
+      }, 10_000);
+    }
+
+    process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
+    process.on("SIGINT", () => gracefulShutdown("SIGINT"));
+  })();
 }
