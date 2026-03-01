@@ -7,6 +7,10 @@ import {
   MAX_SAVED_CHATS,
   escapeHtml,
   renderMarkdown,
+  formatDuration,
+  computeLatencyDistribution,
+  computeToolLatencyAvg,
+  formatTimelineEntry,
 } from "../src/ui-helpers";
 
 describe("ui-helpers", () => {
@@ -230,6 +234,138 @@ describe("ui-helpers", () => {
       expect(result).toContain("<em>Note:</em>");
       expect(result).toContain("<ul>");
       expect(result).toContain("item A");
+    });
+  });
+
+  describe("formatDuration", () => {
+    it("formats milliseconds below 1000 as ms", () => {
+      expect(formatDuration(450)).toBe("450ms");
+    });
+
+    it("formats milliseconds at or above 1000 as seconds", () => {
+      expect(formatDuration(1000)).toBe("1.0s");
+      expect(formatDuration(2500)).toBe("2.5s");
+    });
+
+    it("formats large durations correctly", () => {
+      expect(formatDuration(15200)).toBe("15.2s");
+    });
+
+    it("handles zero", () => {
+      expect(formatDuration(0)).toBe("0ms");
+    });
+
+    it("handles null/undefined gracefully", () => {
+      expect(formatDuration(null as any)).toBe("—");
+      expect(formatDuration(undefined as any)).toBe("—");
+    });
+  });
+
+  describe("computeLatencyDistribution", () => {
+    it("returns null for empty array", () => {
+      expect(computeLatencyDistribution([])).toBeNull();
+    });
+
+    it("computes avg, p50, p95 for single value", () => {
+      const result = computeLatencyDistribution([5000]);
+      expect(result).not.toBeNull();
+      expect(result!.avg).toBe(5000);
+      expect(result!.p50).toBe(5000);
+      expect(result!.p95).toBe(5000);
+    });
+
+    it("computes correct p50 for even count", () => {
+      const result = computeLatencyDistribution([100, 200, 300, 400]);
+      expect(result!.p50).toBe(250); // median of 200 and 300
+    });
+
+    it("computes correct p50 for odd count", () => {
+      const result = computeLatencyDistribution([100, 200, 300]);
+      expect(result!.p50).toBe(200);
+    });
+
+    it("computes correct p95", () => {
+      // 20 values: 1..20 * 100
+      const vals = Array.from({ length: 20 }, (_, i) => (i + 1) * 100);
+      const result = computeLatencyDistribution(vals);
+      expect(result!.p95).toBe(1900); // index ceil(20*0.95)-1 = 18 -> 1900
+    });
+
+    it("returns correct avg", () => {
+      const result = computeLatencyDistribution([1000, 2000, 3000]);
+      expect(result!.avg).toBe(2000);
+    });
+  });
+
+  describe("computeToolLatencyAvg", () => {
+    it("returns empty object for empty map", () => {
+      expect(computeToolLatencyAvg({})).toEqual({});
+    });
+
+    it("computes average per tool", () => {
+      const map = {
+        get_medications: [100, 200, 300],
+        allergy_check: [500, 700],
+      };
+      const result = computeToolLatencyAvg(map);
+      expect(result.get_medications).toBe(200);
+      expect(result.allergy_check).toBe(600);
+    });
+
+    it("handles single-entry arrays", () => {
+      const result = computeToolLatencyAvg({ get_lab_results: [1500] });
+      expect(result.get_lab_results).toBe(1500);
+    });
+  });
+
+  describe("formatTimelineEntry", () => {
+    it("formats a successful request", () => {
+      const entry = formatTimelineEntry({
+        tool_calls: [{ name: "get_medications" }],
+        timing: { total_ms: 4200 },
+        error: null,
+      });
+      expect(entry.tools).toBe("get_medications");
+      expect(entry.duration).toBe("4.2s");
+      expect(entry.success).toBe(true);
+    });
+
+    it("formats a multi-tool request", () => {
+      const entry = formatTimelineEntry({
+        tool_calls: [{ name: "get_patient_summary" }, { name: "get_medications" }],
+        timing: { total_ms: 8100 },
+        error: null,
+      });
+      expect(entry.tools).toBe("get_patient_summary, get_medications");
+      expect(entry.duration).toBe("8.1s");
+      expect(entry.success).toBe(true);
+    });
+
+    it("marks error requests as unsuccessful", () => {
+      const entry = formatTimelineEntry({
+        tool_calls: [],
+        timing: { total_ms: 1200 },
+        error: "timeout",
+      });
+      expect(entry.success).toBe(false);
+    });
+
+    it("handles missing timing", () => {
+      const entry = formatTimelineEntry({
+        tool_calls: [{ name: "allergy_check" }],
+        timing: null,
+        error: null,
+      });
+      expect(entry.duration).toBe("—");
+    });
+
+    it("handles empty tool calls", () => {
+      const entry = formatTimelineEntry({
+        tool_calls: [],
+        timing: { total_ms: 3000 },
+        error: null,
+      });
+      expect(entry.tools).toBe("(no tools)");
     });
   });
 });

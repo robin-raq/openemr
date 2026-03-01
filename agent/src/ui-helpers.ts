@@ -233,3 +233,87 @@ export function renderMarkdown(text: string): string {
 
   return result;
 }
+
+// --- Observability Helper Functions ---
+
+/**
+ * Format a duration in milliseconds to a human-readable string.
+ * Returns "Xms" for <1000ms, "X.Xs" for >=1000ms.
+ */
+export function formatDuration(ms: number | null | undefined): string {
+  if (ms == null) return "—";
+  if (ms >= 1000) return (ms / 1000).toFixed(1) + "s";
+  return Math.round(ms) + "ms";
+}
+
+export interface LatencyDistribution {
+  avg: number;
+  p50: number;
+  p95: number;
+}
+
+/**
+ * Compute average, p50 (median), and p95 latency from an array of durations in ms.
+ * Returns null if the array is empty.
+ */
+export function computeLatencyDistribution(
+  latencies: number[]
+): LatencyDistribution | null {
+  if (latencies.length === 0) return null;
+  const sorted = [...latencies].sort((a, b) => a - b);
+  const n = sorted.length;
+  const avg = Math.round(sorted.reduce((s, v) => s + v, 0) / n);
+
+  let p50: number;
+  if (n % 2 === 1) {
+    p50 = sorted[Math.floor(n / 2)];
+  } else {
+    p50 = Math.round((sorted[n / 2 - 1] + sorted[n / 2]) / 2);
+  }
+
+  const p95Index = Math.min(Math.ceil(n * 0.95) - 1, n - 1);
+  const p95 = sorted[p95Index];
+
+  return { avg, p50, p95 };
+}
+
+/**
+ * Compute average latency per tool from a map of tool_name -> [durations].
+ * Returns a map of tool_name -> avg_ms (rounded).
+ */
+export function computeToolLatencyAvg(
+  toolLatencyMap: Record<string, number[]>
+): Record<string, number> {
+  const result: Record<string, number> = {};
+  for (const [tool, durations] of Object.entries(toolLatencyMap)) {
+    if (durations.length > 0) {
+      result[tool] = Math.round(
+        durations.reduce((s, v) => s + v, 0) / durations.length
+      );
+    }
+  }
+  return result;
+}
+
+export interface TimelineEntry {
+  tools: string;
+  duration: string;
+  success: boolean;
+}
+
+/**
+ * Format a response log entry into a timeline display entry.
+ */
+export function formatTimelineEntry(entry: {
+  tool_calls: { name: string }[];
+  timing: { total_ms: number } | null;
+  error: string | null;
+}): TimelineEntry {
+  const tools =
+    entry.tool_calls.length > 0
+      ? entry.tool_calls.map((tc) => tc.name).join(", ")
+      : "(no tools)";
+  const duration = entry.timing ? formatDuration(entry.timing.total_ms) : "—";
+  const success = !entry.error;
+  return { tools, duration, success };
+}
