@@ -208,10 +208,13 @@
       cursor: pointer;
     }
     .patient-selector select option { color: #1e293b; background: white; }
-    .patient-selector select.locked {
+    .patient-selector select.locked,
+    .patient-selector select:disabled {
       opacity: 0.7;
       pointer-events: none;
       border-color: rgba(255,255,255,0.15);
+      -webkit-appearance: none;
+      cursor: not-allowed;
     }
     .patient-lock-hint {
       font-size: 0.625rem;
@@ -396,6 +399,27 @@
       font-weight: 500;
     }
     .tool-badge .icon { font-size: 0.75rem; }
+    .tool-badge.streaming-badge {
+      animation: tool-pulse 1.5s ease-in-out infinite;
+      border-color: #93c5fd;
+      background: #dbeafe;
+    }
+    @keyframes tool-pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.6; }
+    }
+    .message.streaming .message-bubble {
+      border-left: 3px solid #2563eb;
+    }
+    .streaming-cursor::after {
+      content: '\u2588';
+      animation: blink 1s step-end infinite;
+      color: #2563eb;
+    }
+    @keyframes blink {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0; }
+    }
     .tool-detail {
       margin-top: 0.375rem;
       font-size: 0.75rem;
@@ -1014,26 +1038,32 @@
     }
     .sr-confidence-bar {
       flex: 1;
-      height: 8px;
+      height: 24px;
       background: #e2e8f0;
-      border-radius: 4px;
+      border-radius: 6px;
       overflow: hidden;
+      position: relative;
     }
     .sr-confidence-fill {
       height: 100%;
-      border-radius: 4px;
+      border-radius: 6px;
       transition: width 0.4s ease;
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      padding-right: 8px;
+      min-width: 60px;
+    }
+    .sr-confidence-fill .sr-conf-inner {
+      font-size: 0.75rem;
+      font-weight: 700;
+      color: #fff;
+      white-space: nowrap;
+      text-shadow: 0 1px 2px rgba(0,0,0,0.2);
     }
     .sr-conf-high { background: #16a34a; color: #16a34a; }
     .sr-conf-med { background: #f59e0b; color: #f59e0b; }
     .sr-conf-low { background: #ef4444; color: #ef4444; }
-    .sr-confidence-pct {
-      font-size: 0.8125rem;
-      font-weight: 700;
-      width: 40px;
-      text-align: right;
-      flex-shrink: 0;
-    }
     .sr-checks-grid {
       display: grid;
       grid-template-columns: 1fr 1fr;
@@ -1348,6 +1378,13 @@
             <div class="obs-stat-label">Tool Success</div>
           </div>
         </div>
+        <div id="obs-token-usage" style="margin-top:0.5rem;padding:6px 8px;background:#f8fafc;border-radius:6px;font-size:0.75rem;color:#475569;display:none">
+          <div style="font-weight:600;margin-bottom:4px;color:#334155">Token Usage</div>
+          <div style="display:flex;justify-content:space-between"><span>Input:</span><span id="obs-input-tokens">0</span></div>
+          <div style="display:flex;justify-content:space-between"><span>Output:</span><span id="obs-output-tokens">0</span></div>
+          <div style="display:flex;justify-content:space-between"><span>Cache Read:</span><span id="obs-cache-tokens">0</span></div>
+          <div style="display:flex;justify-content:space-between;margin-top:4px;padding-top:4px;border-top:1px solid #e2e8f0;font-weight:600"><span>Est. Cost:</span><span id="obs-est-cost">$0.000000</span></div>
+        </div>
         <div class="obs-latency-dist" id="obs-latency-dist" style="display:none"></div>
       </div>
     </div>
@@ -1488,6 +1525,14 @@
       responseLog: [], // per-response metadata for persistence
       confidenceScores: [],  // all confidence scores for avg computation
       lastQuery: null, // last user query for "Last Request" display
+      isOpen: true, // sidebar starts open; skip render when closed
+      _renderPending: false, // true when render was skipped while closed
+      _saveTimer: null, // debounce timer for save()
+      // Token usage tracking
+      totalInputTokens: 0,
+      totalOutputTokens: 0,
+      totalCostUsd: 0,
+      cacheReadTokens: 0,
       // Performance target tracking
       perf: {
         singleToolLatencies: [],  // latencies for 1-tool queries
@@ -1505,15 +1550,22 @@
             toolUsage: this.toolUsage, toolLatencies: this.toolLatencies, toolLatencyMap: this.toolLatencyMap,
             safetyAlerts: this.safetyAlerts, recentErrors: this.recentErrors,
             responseLog: this.responseLog, confidenceScores: this.confidenceScores,
-            lastQuery: this.lastQuery, perf: this.perf
+            lastQuery: this.lastQuery, perf: this.perf,
+            totalInputTokens: this.totalInputTokens, totalOutputTokens: this.totalOutputTokens,
+            totalCostUsd: this.totalCostUsd, cacheReadTokens: this.cacheReadTokens
           }));
         } catch (e) { /* localStorage full or unavailable */ }
       },
+      debouncedSave: function() {
+        const self = this;
+        if (self._saveTimer) clearTimeout(self._saveTimer);
+        self._saveTimer = setTimeout(function() { self.save(); }, 500);
+      },
       load: function() {
         try {
-          var raw = localStorage.getItem(OBS_STORAGE_KEY);
+          const raw = localStorage.getItem(OBS_STORAGE_KEY);
           if (!raw) return;
-          var d = JSON.parse(raw);
+          const d = JSON.parse(raw);
           this.requests = d.requests || 0;
           this.errors = d.errors || 0;
           this.latencies = d.latencies || [];
@@ -1525,6 +1577,10 @@
           this.responseLog = d.responseLog || [];
           this.confidenceScores = d.confidenceScores || [];
           this.lastQuery = d.lastQuery || null;
+          this.totalInputTokens = d.totalInputTokens || 0;
+          this.totalOutputTokens = d.totalOutputTokens || 0;
+          this.totalCostUsd = d.totalCostUsd || 0;
+          this.cacheReadTokens = d.cacheReadTokens || 0;
           if (d.perf) {
             this.perf.singleToolLatencies = d.perf.singleToolLatencies || [];
             this.perf.multiStepLatencies = d.perf.multiStepLatencies || [];
@@ -1542,12 +1598,14 @@
         this.toolUsage = {}; this.toolLatencies = []; this.toolLatencyMap = {};
         this.safetyAlerts = 0; this.recentErrors = []; this.responseLog = [];
         this.confidenceScores = []; this.lastQuery = null;
+        this.totalInputTokens = 0; this.totalOutputTokens = 0;
+        this.totalCostUsd = 0; this.cacheReadTokens = 0;
         this.perf = { singleToolLatencies: [], multiStepLatencies: [], toolExpected: 0, toolSucceeded: 0, hallucinationCount: 0, verificationCorrect: 0, totalVerified: 0 };
         this.save(); this.render();
       },
       exportJSON: function() {
-        var blob = new Blob([JSON.stringify({ responseLog: this.responseLog, toolUsage: this.toolUsage, toolLatencyMap: this.toolLatencyMap, latencies: this.latencies, perf: this.perf, requests: this.requests, errors: this.errors }, null, 2)], { type: 'application/json' });
-        var a = document.createElement('a'); a.href = URL.createObjectURL(blob);
+        const blob = new Blob([JSON.stringify({ responseLog: this.responseLog, toolUsage: this.toolUsage, toolLatencyMap: this.toolLatencyMap, latencies: this.latencies, perf: this.perf, requests: this.requests, errors: this.errors }, null, 2)], { type: 'application/json' });
+        const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
         a.download = 'obs-export-' + new Date().toISOString().slice(0, 19) + '.json';
         a.click(); URL.revokeObjectURL(a.href);
       },
@@ -1556,7 +1614,7 @@
         if (error) {
           this.errors++;
           this.recentErrors.push({ time: new Date().toLocaleTimeString(), msg: String(error).slice(0, 100) });
-          if (this.recentErrors.length > 10) this.recentErrors.shift();
+          if (this.recentErrors.length > 5) this.recentErrors.shift();
         }
         if (data && data.timing && data.timing.total_ms) {
           this.latencies.push(data.timing.total_ms);
@@ -1577,8 +1635,8 @@
           this.safetyAlerts += data.verification_flags.length;
         }
         if (data && data.performance) {
-          var p = data.performance;
-          var tc = p.tool_count || 0;
+          const p = data.performance;
+          const tc = p.tool_count || 0;
           if (tc === 1) this.perf.singleToolLatencies.push(p.latency_ms);
           if (tc >= 3) this.perf.multiStepLatencies.push(p.latency_ms);
           if (tc > 0) { this.perf.toolExpected++; if (p.tool_success) this.perf.toolSucceeded++; }
@@ -1588,6 +1646,13 @@
         }
         if (data && data.structured_result && data.structured_result.confidence_score != null) {
           this.confidenceScores.push(data.structured_result.confidence_score);
+        }
+        // Token usage tracking
+        if (data && data.token_usage) {
+          this.totalInputTokens += data.token_usage.input_tokens || 0;
+          this.totalOutputTokens += data.token_usage.output_tokens || 0;
+          this.totalCostUsd += data.token_usage.estimated_cost_usd || 0;
+          this.cacheReadTokens += data.token_usage.cache_read_tokens || 0;
         }
         if (data) {
           this.responseLog.push({
@@ -1600,75 +1665,87 @@
             time: new Date().toLocaleTimeString(),
             error: error || null
           });
-          if (this.responseLog.length > 50) this.responseLog.shift();
+          if (this.responseLog.length > 20) this.responseLog.shift();
         }
-        this.save();
+        this.debouncedSave();
         this.render();
       },
       avgLatency: function() {
         if (this.latencies.length === 0) return null;
-        var sum = this.latencies.reduce(function(a, b) { return a + b; }, 0);
+        const sum = this.latencies.reduce(function(a, b) { return a + b; }, 0);
         return Math.round(sum / this.latencies.length);
       },
       avgToolTime: function() {
         if (this.toolLatencies.length === 0) return null;
-        var sum = this.toolLatencies.reduce(function(a, b) { return a + b; }, 0);
+        const sum = this.toolLatencies.reduce(function(a, b) { return a + b; }, 0);
         return Math.round(sum / this.toolLatencies.length);
       },
       render: function() {
-        var fmtDur = function(ms) { if (ms == null) return '\u2014'; return ms >= 1000 ? (ms / 1000).toFixed(1) + 's' : Math.round(ms) + 'ms'; };
+        if (!this.isOpen) { this._renderPending = true; return; }
+        this._renderPending = false;
+        const fmtDur = function(ms) { if (ms == null) return '\u2014'; return ms >= 1000 ? (ms / 1000).toFixed(1) + 's' : Math.round(ms) + 'ms'; };
 
         document.getElementById('obs-requests').textContent = this.requests;
         document.getElementById('obs-errors').textContent = this.errors;
         document.getElementById('obs-safety-alerts').textContent = this.safetyAlerts;
 
         // Avg confidence
-        var avgConfEl = document.getElementById('obs-avg-confidence');
+        const avgConfEl = document.getElementById('obs-avg-confidence');
         if (this.confidenceScores.length > 0) {
-          var avgConf = this.confidenceScores.reduce(function(a, b) { return a + b; }, 0) / this.confidenceScores.length;
-          var confPct = Math.round(avgConf * 100);
+          const avgConf = this.confidenceScores.reduce(function(a, b) { return a + b; }, 0) / this.confidenceScores.length;
+          const confPct = Math.round(avgConf * 100);
           avgConfEl.textContent = confPct + '%';
           avgConfEl.className = 'obs-stat-value' + (confPct >= 70 ? '' : confPct >= 40 ? ' warn' : ' error');
         } else { avgConfEl.textContent = '\u2014'; }
 
         // Tool success rate
-        var toolSuccessEl = document.getElementById('obs-tool-success-rate');
+        const toolSuccessEl = document.getElementById('obs-tool-success-rate');
         if (this.perf.toolExpected > 0) {
-          var tsRate = Math.round((this.perf.toolSucceeded / this.perf.toolExpected) * 100);
+          const tsRate = Math.round((this.perf.toolSucceeded / this.perf.toolExpected) * 100);
           toolSuccessEl.textContent = tsRate + '%';
           toolSuccessEl.className = 'obs-stat-value' + (tsRate >= 95 ? '' : ' error');
         } else { toolSuccessEl.textContent = '\u2014'; }
 
-        var avg = this.avgLatency();
+        // Token usage
+        const tokenEl = document.getElementById('obs-token-usage');
+        if (this.totalInputTokens > 0 || this.totalOutputTokens > 0) {
+          tokenEl.style.display = 'block';
+          document.getElementById('obs-input-tokens').textContent = this.totalInputTokens.toLocaleString();
+          document.getElementById('obs-output-tokens').textContent = this.totalOutputTokens.toLocaleString();
+          document.getElementById('obs-cache-tokens').textContent = this.cacheReadTokens.toLocaleString();
+          document.getElementById('obs-est-cost').textContent = '$' + this.totalCostUsd.toFixed(6);
+        } else { tokenEl.style.display = 'none'; }
+
+        const avg = this.avgLatency();
         document.getElementById('obs-avg-latency').textContent = fmtDur(avg);
 
-        var avgTool = this.avgToolTime();
+        const avgTool = this.avgToolTime();
         document.getElementById('obs-avg-tool-time').textContent = fmtDur(avgTool);
         document.getElementById('obs-total-tools').textContent = this.toolLatencies.length;
 
         // Latency distribution (p50/p95)
-        var distEl = document.getElementById('obs-latency-dist');
+        const distEl = document.getElementById('obs-latency-dist');
         if (this.latencies.length >= 2) {
-          var sorted = this.latencies.slice().sort(function(a, b) { return a - b; });
-          var n = sorted.length;
-          var p50 = n % 2 === 1 ? sorted[Math.floor(n / 2)] : Math.round((sorted[n / 2 - 1] + sorted[n / 2]) / 2);
-          var p95 = sorted[Math.min(Math.ceil(n * 0.95) - 1, n - 1)];
+          const sorted = this.latencies.slice().sort(function(a, b) { return a - b; });
+          const n = sorted.length;
+          const p50 = n % 2 === 1 ? sorted[Math.floor(n / 2)] : Math.round((sorted[n / 2 - 1] + sorted[n / 2]) / 2);
+          const p95 = sorted[Math.min(Math.ceil(n * 0.95) - 1, n - 1)];
           distEl.style.display = 'flex';
           distEl.innerHTML = '<span>Avg: <strong>' + fmtDur(avg) + '</strong></span><span>p50: <strong>' + fmtDur(p50) + '</strong></span><span>p95: <strong>' + fmtDur(p95) + '</strong></span><span style="color:#94a3b8">(n=' + n + ')</span>';
         } else { distEl.style.display = 'none'; }
 
         // Last Request trace (P0)
-        var lastReqEl = document.getElementById('obs-last-request');
-        var lastLog = this.responseLog.length > 0 ? this.responseLog[this.responseLog.length - 1] : null;
+        const lastReqEl = document.getElementById('obs-last-request');
+        const lastLog = this.responseLog.length > 0 ? this.responseLog[this.responseLog.length - 1] : null;
         if (lastLog) {
-          var query = (lastLog.query || '').slice(0, 60) || '(unknown query)';
-          var totalMs = lastLog.timing ? lastLog.timing.total_ms : null;
-          var toolSumMs = 0;
+          const query = (lastLog.query || '').slice(0, 60) || '(unknown query)';
+          const totalMs = lastLog.timing ? lastLog.timing.total_ms : null;
+          let toolSumMs = 0;
           if (lastLog.timing && lastLog.timing.tool_traces) {
             toolSumMs = lastLog.timing.tool_traces.reduce(function(s, t) { return s + t.duration_ms; }, 0);
           }
-          var llmMs = totalMs ? Math.max(0, totalMs - toolSumMs) : null;
-          var toolPills = '';
+          const llmMs = totalMs ? Math.max(0, totalMs - toolSumMs) : null;
+          let toolPills = '';
           if (lastLog.timing && lastLog.timing.tool_traces) {
             lastLog.timing.tool_traces.forEach(function(t) {
               toolPills += '<span class="obs-last-tool-pill">' + (TOOL_LABELS[t.tool] || t.tool) + ' (' + fmtDur(t.duration_ms) + ')</span>';
@@ -1690,23 +1767,23 @@
         }
 
         // Tool usage bars with latency (P0)
-        var usageDiv = document.getElementById('obs-tool-usage');
-        var entries = Object.entries(this.toolUsage);
+        const usageDiv = document.getElementById('obs-tool-usage');
+        const entries = Object.entries(this.toolUsage);
         if (entries.length === 0) {
           usageDiv.innerHTML = '<div class="obs-no-data">No tool usage recorded yet<div class="obs-no-data-detail">Tool counts and avg latencies appear here</div></div>';
         } else {
           entries.sort(function(a, b) { return b[1] - a[1]; });
-          var maxCount = entries[0][1];
-          var tlm = this.toolLatencyMap;
-          var html = '';
+          const maxCount = entries[0][1];
+          const tlm = this.toolLatencyMap;
+          let html = '';
           entries.forEach(function(e) {
-            var toolKey = e[0];
-            var name = TOOL_LABELS[toolKey] || toolKey;
-            var count = e[1];
-            var pct = Math.round((count / maxCount) * 100);
-            var avgLat = '';
+            const toolKey = e[0];
+            const name = TOOL_LABELS[toolKey] || toolKey;
+            const count = e[1];
+            const pct = Math.round((count / maxCount) * 100);
+            let avgLat = '';
             if (tlm[toolKey] && tlm[toolKey].length > 0) {
-              var tavg = Math.round(tlm[toolKey].reduce(function(s, v) { return s + v; }, 0) / tlm[toolKey].length);
+              const tavg = Math.round(tlm[toolKey].reduce(function(s, v) { return s + v; }, 0) / tlm[toolKey].length);
               avgLat = '<span class="obs-tool-latency">(' + fmtDur(tavg) + ')</span>';
             }
             html += '<div class="obs-tool-row">' +
@@ -1719,19 +1796,19 @@
         }
 
         // Request timeline (P1)
-        var timelineEl = document.getElementById('obs-timeline');
+        const timelineEl = document.getElementById('obs-timeline');
         if (this.responseLog.length === 0) {
           timelineEl.innerHTML = '<div class="obs-no-data">No requests yet</div>';
         } else {
-          var recent = this.responseLog.slice(-10).reverse();
-          var thtml = '';
+          const recent = this.responseLog.slice(-10).reverse();
+          let thtml = '';
           recent.forEach(function(r) {
-            var tools = r.tool_calls && r.tool_calls.length > 0
+            const tools = r.tool_calls && r.tool_calls.length > 0
               ? r.tool_calls.map(function(tc) { return TOOL_LABELS[tc.name] || tc.name; }).join(', ')
               : '(no tools)';
-            var dur = r.timing ? fmtDur(r.timing.total_ms) : '\u2014';
-            var status = r.error ? '\u274C' : '\u2705';
-            var time = r.time || '';
+            const dur = r.timing ? fmtDur(r.timing.total_ms) : '\u2014';
+            const status = r.error ? '\u274C' : '\u2705';
+            const time = r.time || '';
             thtml += '<div class="obs-timeline-entry">' +
               '<span class="obs-timeline-time">' + time + '</span>' +
               '<span class="obs-timeline-tools" title="' + escapeHtml(tools) + '">' + escapeHtml(tools) + '</span>' +
@@ -1743,9 +1820,9 @@
         }
 
         // Error log with badge and copy
-        var errorLog = document.getElementById('obs-error-log');
-        var errorBadge = document.getElementById('obs-error-badge');
-        var copyErrorsBtn = document.getElementById('obs-copy-errors');
+        const errorLog = document.getElementById('obs-error-log');
+        const errorBadge = document.getElementById('obs-error-badge');
+        const copyErrorsBtn = document.getElementById('obs-copy-errors');
         if (this.recentErrors.length > 0) {
           errorLog.style.display = 'block';
           errorLog.innerHTML = this.recentErrors.map(function(e) {
@@ -1760,10 +1837,10 @@
         }
 
         // Langfuse link
-        var lfContainer = document.getElementById('obs-langfuse-container');
+        const lfContainer = document.getElementById('obs-langfuse-container');
         if (lastLog && lastLog.structured_result && lastLog.structured_result.trace_id) {
           lfContainer.style.display = 'block';
-          var lfLink = document.getElementById('obs-langfuse-link');
+          const lfLink = document.getElementById('obs-langfuse-link');
           lfLink.href = 'https://us.cloud.langfuse.com/trace/' + lastLog.structured_result.trace_id;
         } else if (lfContainer) { lfContainer.style.display = 'none'; }
 
@@ -1771,14 +1848,14 @@
         this.renderPerformance();
       },
       renderPerformance: function() {
-        var p = this.perf;
-        var targetsMet = 0;
-        var targetsTotal = 5;
+        const p = this.perf;
+        let targetsMet = 0;
+        const targetsTotal = 5;
 
         // Helper: update a target row
         function setTarget(id, value, met) {
-          var valEl = document.getElementById('perf-val-' + id);
-          var iconEl = document.getElementById('perf-icon-' + id);
+          const valEl = document.getElementById('perf-val-' + id);
+          const iconEl = document.getElementById('perf-icon-' + id);
           if (!valEl || !iconEl) return;
           valEl.textContent = value;
           valEl.className = 'perf-value ' + (met === null ? 'pending' : met ? 'met' : 'unmet');
@@ -1787,8 +1864,8 @@
 
         // 1. Single-tool latency <5s
         if (p.singleToolLatencies.length > 0) {
-          var avgSingle = p.singleToolLatencies.reduce(function(a, b) { return a + b; }, 0) / p.singleToolLatencies.length;
-          var met1 = avgSingle < 5000;
+          const avgSingle = p.singleToolLatencies.reduce(function(a, b) { return a + b; }, 0) / p.singleToolLatencies.length;
+          const met1 = avgSingle < 5000;
           if (met1) targetsMet++;
           setTarget('latency1', (avgSingle / 1000).toFixed(1) + 's (n=' + p.singleToolLatencies.length + ')', met1);
         } else {
@@ -1797,8 +1874,8 @@
 
         // 2. Multi-step latency <15s
         if (p.multiStepLatencies.length > 0) {
-          var avgMulti = p.multiStepLatencies.reduce(function(a, b) { return a + b; }, 0) / p.multiStepLatencies.length;
-          var met2 = avgMulti < 15000;
+          const avgMulti = p.multiStepLatencies.reduce(function(a, b) { return a + b; }, 0) / p.multiStepLatencies.length;
+          const met2 = avgMulti < 15000;
           if (met2) targetsMet++;
           setTarget('latency3', (avgMulti / 1000).toFixed(1) + 's (n=' + p.multiStepLatencies.length + ')', met2);
         } else {
@@ -1807,8 +1884,8 @@
 
         // 3. Tool success >95%
         if (p.toolExpected > 0) {
-          var successRate = (p.toolSucceeded / p.toolExpected) * 100;
-          var met3 = successRate >= 95;
+          const successRate = (p.toolSucceeded / p.toolExpected) * 100;
+          const met3 = successRate >= 95;
           if (met3) targetsMet++;
           setTarget('toolsuccess', successRate.toFixed(0) + '% (n=' + p.toolExpected + ')', met3);
         } else {
@@ -1817,8 +1894,8 @@
 
         // 4. Hallucination <5%
         if (this.requests > 0) {
-          var hallucRate = (p.hallucinationCount / this.requests) * 100;
-          var met4 = hallucRate < 5;
+          const hallucRate = (p.hallucinationCount / this.requests) * 100;
+          const met4 = hallucRate < 5;
           if (met4) targetsMet++;
           setTarget('halluc', hallucRate.toFixed(1) + '% (n=' + this.requests + ')', met4);
         } else {
@@ -1827,8 +1904,8 @@
 
         // 5. Verification >90%
         if (p.totalVerified > 0) {
-          var verifyRate = (p.verificationCorrect / p.totalVerified) * 100;
-          var met5 = verifyRate >= 90;
+          const verifyRate = (p.verificationCorrect / p.totalVerified) * 100;
+          const met5 = verifyRate >= 90;
           if (met5) targetsMet++;
           setTarget('verify', verifyRate.toFixed(0) + '% (n=' + p.totalVerified + ')', met5);
         } else {
@@ -1836,7 +1913,7 @@
         }
 
         // Overall score
-        var scoreEl = document.getElementById('perf-score');
+        const scoreEl = document.getElementById('perf-score');
         if (this.requests > 0) {
           scoreEl.textContent = targetsMet + '/' + targetsTotal;
           scoreEl.className = 'perf-score-value ' + (targetsMet >= 4 ? 'good' : targetsMet >= 2 ? 'ok' : 'bad');
@@ -1852,6 +1929,10 @@
       document.getElementById('obs-sidebar').classList.toggle('open');
       document.getElementById('obs-toggle').classList.toggle('open');
       document.body.classList.toggle('sidebar-open');
+      obsTracker.isOpen = document.getElementById('obs-sidebar').classList.contains('open');
+      if (obsTracker.isOpen && obsTracker._renderPending) {
+        obsTracker.render();
+      }
     }
     document.getElementById('obs-toggle').addEventListener('click', toggleObsSidebar);
     document.getElementById('obs-close').addEventListener('click', toggleObsSidebar);
@@ -1864,25 +1945,28 @@
       obsTracker.exportJSON();
     });
     document.getElementById('obs-copy-session').addEventListener('click', function() {
-      var sid = document.getElementById('obs-session-id').textContent;
+      const sid = document.getElementById('obs-session-id').textContent;
       if (sid && sid !== '\u2014') {
         navigator.clipboard.writeText(sid).then(function() {
-          var btn = document.getElementById('obs-copy-session');
+          const btn = document.getElementById('obs-copy-session');
           btn.textContent = '\u2705';
           setTimeout(function() { btn.innerHTML = '&#128203;'; }, 1500);
         });
       }
     });
     document.getElementById('obs-copy-errors').addEventListener('click', function() {
-      var errText = obsTracker.recentErrors.map(function(e) { return e.time + ': ' + e.msg; }).join('\n');
+      const errText = obsTracker.recentErrors.map(function(e) { return e.time + ': ' + e.msg; }).join('\n');
       if (errText) {
         navigator.clipboard.writeText(errText).then(function() {
-          var btn = document.getElementById('obs-copy-errors');
+          const btn = document.getElementById('obs-copy-errors');
           btn.textContent = '\u2705 Copied';
           setTimeout(function() { btn.textContent = 'Copy errors'; }, 1500);
         });
       }
     });
+
+    // Flush debounced save on page unload to prevent data loss
+    window.addEventListener('beforeunload', function() { obsTracker.save(); });
 
     const chatContainer = document.getElementById('chat-container');
     const messageInput = document.getElementById('message-input');
@@ -1928,7 +2012,8 @@
     // Lock/unlock the patient dropdown — one patient per chat session
     function lockPatientDropdown() {
       patientSelect.classList.add('locked');
-      var hint = document.getElementById('patient-lock-hint');
+      patientSelect.disabled = true;
+      let hint = document.getElementById('patient-lock-hint');
       if (!hint) {
         hint = document.createElement('span');
         hint.id = 'patient-lock-hint';
@@ -1941,27 +2026,28 @@
     }
     function unlockPatientDropdown() {
       patientSelect.classList.remove('locked');
-      var hint = document.getElementById('patient-lock-hint');
+      patientSelect.disabled = false;
+      const hint = document.getElementById('patient-lock-hint');
       if (hint) hint.style.display = 'none';
     }
 
     patientSelect.addEventListener('change', function() {
       // If chat has messages, block the change and show switch prompt
-      var userMsgCount = chatContainer.querySelectorAll('.message.user').length;
+      const userMsgCount = chatContainer.querySelectorAll('.message.user').length;
       if (userMsgCount > 0 && patientIdForThisChat && patientSelect.value !== patientIdForThisChat) {
-        var newPid = patientSelect.value;
-        var newName = PATIENT_INFO[newPid]?.name || 'selected patient';
-        var prevName = PATIENT_INFO[patientIdForThisChat]?.name || 'current patient';
+        const newPid = patientSelect.value;
+        const newName = PATIENT_INFO[newPid]?.name || 'selected patient';
+        const prevName = PATIENT_INFO[patientIdForThisChat]?.name || 'current patient';
         // Revert the dropdown
         patientSelect.value = patientIdForThisChat;
         // Show the switch prompt in chat
-        var oldNotice = document.querySelector('.patient-switch-notice');
+        const oldNotice = document.querySelector('.patient-switch-notice');
         if (oldNotice) oldNotice.remove();
-        var notice = document.createElement('div');
+        const notice = document.createElement('div');
         notice.className = 'patient-switch-notice';
         // Check if there's a previous chat for the new patient
-        var prevChat = getChatIndex().find(function(e) { return e.patient_id === newPid && e.id !== sessionId; });
-        var resumeBtn = prevChat
+        const prevChat = getChatIndex().find(function(e) { return e.patient_id === newPid && e.id !== sessionId; });
+        const resumeBtn = prevChat
           ? '<button class="patient-switch-btn secondary" data-action="resume">Resume chat: "' + escapeHtml(prevChat.title.slice(0, 30)) + '"</button>'
           : '';
         notice.innerHTML = '<div>\u2139\uFE0F This chat is for <strong>' + escapeHtml(prevName) +
@@ -2050,36 +2136,36 @@
      * Escapes HTML first (XSS-safe), then applies markdown transforms.
      */
     function renderMarkdown(text) {
-      var html = escapeHtml(text);
-      var lines = html.split('\n');
-      var blocks = [];
-      var currentList = null;
+      const html = escapeHtml(text);
+      const lines = html.split('\n');
+      const blocks = [];
+      let currentList = null;
 
       function flushList() {
         if (currentList) {
-          var tag = currentList.type;
-          var inner = currentList.items.map(function(item) { return '<li>' + item + '</li>'; }).join('');
+          const tag = currentList.type;
+          const inner = currentList.items.map(function(item) { return '<li>' + item + '</li>'; }).join('');
           blocks.push('<' + tag + '>' + inner + '</' + tag + '>');
           currentList = null;
         }
       }
 
-      for (var i = 0; i < lines.length; i++) {
-        var line = lines[i];
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
 
         // Horizontal rule
         if (/^-{3,}$/.test(line.trim())) { flushList(); blocks.push('<hr>'); continue; }
 
         // Headings
-        var h3Match = line.match(/^###\s+(.+)$/);
+        const h3Match = line.match(/^###\s+(.+)$/);
         if (h3Match) { flushList(); blocks.push('<h4 class="md-h4">' + h3Match[1] + '</h4>'); continue; }
-        var h2Match = line.match(/^##\s+(.+)$/);
+        const h2Match = line.match(/^##\s+(.+)$/);
         if (h2Match) { flushList(); blocks.push('<h3 class="md-h3">' + h2Match[1] + '</h3>'); continue; }
-        var h1Match = line.match(/^#\s+(.+)$/);
+        const h1Match = line.match(/^#\s+(.+)$/);
         if (h1Match) { flushList(); blocks.push('<h2 class="md-h2">' + h1Match[1] + '</h2>'); continue; }
 
         // Unordered list
-        var ulMatch = line.match(/^[-*]\s+(.+)$/);
+        const ulMatch = line.match(/^[-*]\s+(.+)$/);
         if (ulMatch) {
           if (currentList && currentList.type !== 'ul') flushList();
           if (!currentList) currentList = { type: 'ul', items: [] };
@@ -2088,7 +2174,7 @@
         }
 
         // Ordered list
-        var olMatch = line.match(/^\d+\.\s+(.+)$/);
+        const olMatch = line.match(/^\d+\.\s+(.+)$/);
         if (olMatch) {
           if (currentList && currentList.type !== 'ol') flushList();
           if (!currentList) currentList = { type: 'ol', items: [] };
@@ -2103,23 +2189,23 @@
       flushList();
 
       // Group text lines into paragraphs
-      var output = [];
-      var paraLines = [];
+      const output = [];
+      let paraLines = [];
       function flushPara() {
         if (paraLines.length > 0) {
           output.push('<p class="md-p">' + paraLines.join('<br>') + '</p>');
           paraLines = [];
         }
       }
-      for (var j = 0; j < blocks.length; j++) {
-        var block = blocks[j];
+      for (let j = 0; j < blocks.length; j++) {
+        const block = blocks[j];
         if (block === '__PARA_BREAK__') { flushPara(); }
         else if (block.charAt(0) === '<' && /^<(h[2-4]|ul|ol|hr)/.test(block)) { flushPara(); output.push(block); }
         else { paraLines.push(block); }
       }
       flushPara();
 
-      var result = output.join('');
+      let result = output.join('');
       // Bold: **text**
       result = result.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
       // Italic: *text* (not inside bold)
@@ -2137,12 +2223,12 @@
     /** Format confidence score (0-1) as percentage with color class */
     function formatConfidence(score) {
       if (score == null) return null;
-      var pct = Math.round(score * 100);
-      var cls = pct >= 70 ? 'high' : pct >= 40 ? 'med' : 'low';
+      const pct = Math.round(score * 100);
+      const cls = pct >= 70 ? 'high' : pct >= 40 ? 'med' : 'low';
       return { pct: pct, cls: cls };
     }
 
-    function addMessage(role, content, toolCalls, safetyAlerts, timing, structuredResult) {
+    function addMessage(role, content, toolCalls, safetyAlerts, timing, structuredResult, reasoningSteps) {
       const welcome = document.querySelector('.welcome');
       if (welcome) welcome.remove();
 
@@ -2185,12 +2271,22 @@
         html += '<div class="tool-detail" onclick="this.classList.toggle(\'open\')">';
         html += '<span>View execution trace</span>';
         html += '<div class="tool-detail-content">';
+        // Show LLM reasoning steps (input → reasoning → tool calls → output)
+        if (reasoningSteps && reasoningSteps.length > 0) {
+          html += '<div style="margin-bottom:8px;"><strong>Agent Reasoning:</strong></div>';
+          reasoningSteps.forEach(function(step, i) {
+            html += '<div style="margin-bottom:6px;padding:6px 8px;background:rgba(37,99,235,0.06);border-left:3px solid #2563eb;border-radius:0 4px 4px 0;font-size:0.8rem;color:#334155;">';
+            html += '<span style="font-weight:600;color:#2563eb;">Step ' + (i + 1) + ':</span> ' + escapeHtml(step);
+            html += '</div>';
+          });
+          html += '<hr style="border:none;border-top:1px solid #e2e8f0;margin:8px 0;">';
+        }
         // Show full breakdown: LLM inference + per-tool, so durations add up to total
         if (timing && timing.tool_traces && timing.tool_traces.length > 0) {
-          var toolSum = timing.tool_traces.reduce(function(s, t) { return s + t.duration_ms; }, 0);
-          var llmMs = timing.total_ms ? Math.max(0, timing.total_ms - toolSum) : 0;
-          var traceLines = [];
-          var stepNum = 1;
+          const toolSum = timing.tool_traces.reduce(function(s, t) { return s + t.duration_ms; }, 0);
+          const llmMs = timing.total_ms ? Math.max(0, timing.total_ms - toolSum) : 0;
+          const traceLines = [];
+          let stepNum = 1;
           traceLines.push({ step: stepNum++, component: 'LLM Inference (Claude)', duration_ms: llmMs, display: formatDuration(llmMs) });
           timing.tool_traces.forEach(function(t) {
             traceLines.push({ step: stepNum++, component: t.tool, duration_ms: t.duration_ms, display: formatDuration(t.duration_ms) });
@@ -2210,27 +2306,34 @@
       if (structuredResult) {
         html += '<div class="sr-card">';
         // Confidence bar
-        var conf = formatConfidence(structuredResult.confidence_score);
+        const conf = formatConfidence(structuredResult.confidence_score);
         if (conf) {
           html += '<div class="sr-confidence-row">';
           html += '<span class="sr-confidence-label">Confidence</span>';
-          html += '<div class="sr-confidence-bar"><div class="sr-confidence-fill sr-conf-' + conf.cls + '" style="width:' + conf.pct + '%"></div></div>';
-          html += '<span class="sr-confidence-pct sr-conf-' + conf.cls + '">' + conf.pct + '%</span>';
+          html += '<div class="sr-confidence-bar"><div class="sr-confidence-fill sr-conf-' + conf.cls + '" style="width:' + conf.pct + '%"><span class="sr-conf-inner">\u{1F3AF} ' + conf.pct + '%</span></div></div>';
           html += '</div>';
         }
         // Verification checks grid
-        var v = structuredResult.verification || {};
-        var vc = v.verification_checks || {};
+        // Healthy responses omit .verification and put has_sources/data_sources at top level.
+        // Unhealthy responses nest everything under .verification.
+        const v = structuredResult.verification || {};
+        const vc = v.verification_checks || {};
+        const isHealthy = !structuredResult.verification && structuredResult.has_sources !== undefined;
+        const srcVerified = isHealthy ? structuredResult.has_sources : v.has_sources;
+        const noHallucination = isHealthy ? true : !!vc.hallucination_detection;
+        const domainSafe = isHealthy ? true : !!vc.domain_constraints;
+        const outputValid = isHealthy ? true : !!v.output_valid;
         html += '<div class="sr-checks-grid">';
-        html += '<div class="sr-check">' + (v.has_sources ? '\u2705' : '\u274C') + ' Sources Verified</div>';
-        html += '<div class="sr-check">' + (vc.hallucination_detection ? '\u2705 No Hallucination' : '\u26A0\uFE0F Hallucination Risk') + '</div>';
-        html += '<div class="sr-check">' + (vc.domain_constraints ? '\u2705' : '\u274C') + ' Domain Safe</div>';
-        html += '<div class="sr-check">' + (v.output_valid ? '\u2705' : '\u274C') + ' Output Valid</div>';
+        html += '<div class="sr-check">' + (srcVerified ? '\u2705' : '\u274C') + ' Sources Verified</div>';
+        html += '<div class="sr-check">' + (noHallucination ? '\u2705 No Hallucination' : '\u26A0\uFE0F Hallucination Risk') + '</div>';
+        html += '<div class="sr-check">' + (domainSafe ? '\u2705' : '\u274C') + ' Domain Safe</div>';
+        html += '<div class="sr-check">' + (outputValid ? '\u2705' : '\u274C') + ' Output Valid</div>';
         html += '</div>';
-        // Source tags
-        if (v.sources && v.sources.length > 0) {
+        // Source tags — use data_sources for healthy, verification.sources for unhealthy
+        const displaySources = isHealthy ? (structuredResult.data_sources || []) : (v.sources || []);
+        if (displaySources.length > 0) {
           html += '<div class="sr-sources">';
-          v.sources.forEach(function(src) {
+          displaySources.forEach(function(src) {
             html += '<span class="sr-source-pill">' + escapeHtml(src) + '</span>';
           });
           html += '</div>';
@@ -2249,13 +2352,13 @@
 
       // Timing display — full breakdown so durations add up
       if (timing && timing.total_ms) {
-        var totalMs = timing.total_ms;
-        var toolCount = timing.tool_count || 0;
-        var toolSumMs = 0;
+        const totalMs = timing.total_ms;
+        const toolCount = timing.tool_count || 0;
+        let toolSumMs = 0;
         if (timing.tool_traces) {
           toolSumMs = timing.tool_traces.reduce(function(s, t) { return s + t.duration_ms; }, 0);
         }
-        var llmInferenceMs = Math.max(0, totalMs - toolSumMs);
+        const llmInferenceMs = Math.max(0, totalMs - toolSumMs);
         html += '<div class="message-timing">';
         html += '\u23F1 ' + formatDuration(totalMs);
         if (toolCount > 0) {
@@ -2263,7 +2366,7 @@
         }
         // Confidence pill in timing row
         if (structuredResult && structuredResult.confidence_score != null) {
-          var cInfo = formatConfidence(structuredResult.confidence_score);
+          const cInfo = formatConfidence(structuredResult.confidence_score);
           if (cInfo) {
             html += '<span class="confidence-pill ' + cInfo.cls + '">\u{1F3AF} ' + cInfo.pct + '%</span>';
           }
@@ -2318,7 +2421,7 @@
       const bubble = btn.closest('.message-bubble');
       const content = bubble ? bubble.querySelector('.message-content') : null;
       if (!content) return;
-      var text = content.innerText || content.textContent || '';
+      const text = content.innerText || content.textContent || '';
       navigator.clipboard.writeText(text).then(function() {
         btn.innerHTML = '&#x2705; Copied!';
         btn.classList.add('copied');
@@ -2328,7 +2431,7 @@
         }, 2000);
       }).catch(function() {
         // Fallback for older browsers
-        var ta = document.createElement('textarea');
+        const ta = document.createElement('textarea');
         ta.value = text;
         document.body.appendChild(ta);
         ta.select();
@@ -2344,7 +2447,7 @@
     }
 
     function showToast(message) {
-      var toast = document.getElementById('feedback-toast');
+      let toast = document.getElementById('feedback-toast');
       if (!toast) {
         toast = document.createElement('div');
         toast.id = 'feedback-toast';
@@ -2518,7 +2621,7 @@
       messageInput.disabled = true;
       setThinking(true);
       try {
-        const patientId = patientSelect.value || null;
+        const patientId = patientIdForThisChat || patientSelect.value || null;
         obsTracker.lastQuery = msg;
         const res = await fetch('/api/chat', {
           method: 'POST',
@@ -2532,7 +2635,7 @@
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || 'Request failed');
         setThinking(false);
-        addMessage('assistant', data.response, data.tool_calls, data.verification_flags, data.timing, data.structured_result);
+        addMessage('assistant', data.response, data.tool_calls, data.verification_flags, data.timing, data.structured_result, data.reasoning_steps);
         obsTracker.record(data, null);
       } catch (err) {
         setThinking(false);
@@ -2544,9 +2647,174 @@
       messageInput.focus();
     }
 
-    sendBtn.addEventListener('click', () => send());
+    // --- SSE streaming helpers ---
+
+    function parseSSEBuffer(buffer) {
+      var parsed = [];
+      var remaining = '';
+      var currentEvent = null;
+      var currentData = '';
+      var lines = buffer.split('\n');
+      for (var i = 0; i < lines.length; i++) {
+        var line = lines[i];
+        if (line.startsWith('event: ')) {
+          currentEvent = line.slice(7).trim();
+        } else if (line.startsWith('data: ')) {
+          currentData = line.slice(6);
+        } else if (line === '') {
+          if (currentEvent && currentData) {
+            try { parsed.push({ event: currentEvent, data: JSON.parse(currentData) }); }
+            catch (e) { /* skip malformed */ }
+          }
+          currentEvent = null;
+          currentData = '';
+        }
+      }
+      // Incomplete event stays in buffer
+      if (currentEvent || currentData) {
+        if (currentEvent) remaining += 'event: ' + currentEvent + '\n';
+        if (currentData) remaining += 'data: ' + currentData + '\n';
+      }
+      return { parsed: parsed, remaining: remaining };
+    }
+
+    function createStreamingPlaceholder() {
+      var welcome = document.querySelector('.welcome');
+      if (welcome) welcome.remove();
+      var div = document.createElement('div');
+      div.className = 'message agent streaming';
+      div.innerHTML =
+        '<div class="message-bubble">' +
+        '<div class="message-content md-rendered streaming-cursor"></div>' +
+        '<div class="tool-badges streaming-tools" style="display:none"></div>' +
+        '</div>';
+      chatContainer.appendChild(div);
+      scrollToBottom();
+      return div;
+    }
+
+    function addStreamingToolBadge(placeholder, toolName) {
+      var container = placeholder.querySelector('.streaming-tools');
+      container.style.display = 'flex';
+      var icon = TOOL_ICONS[toolName] || '\u{1F527}';
+      var label = TOOL_LABELS[toolName] || toolName;
+      var badge = document.createElement('span');
+      badge.className = 'tool-badge streaming-badge';
+      badge.dataset.tool = toolName;
+      badge.innerHTML = '<span class="icon">' + icon + '</span> ' + escapeHtml(label) + ' <span class="tool-status">\u23F3</span>';
+      container.appendChild(badge);
+    }
+
+    function updateStreamingToolBadge(placeholder, toolName, durationMs) {
+      var badge = placeholder.querySelector('.tool-badge[data-tool="' + toolName + '"]');
+      if (badge) {
+        var statusEl = badge.querySelector('.tool-status');
+        if (statusEl) statusEl.textContent = '(' + formatDuration(durationMs) + ')';
+        badge.classList.remove('streaming-badge');
+      }
+    }
+
+    async function sendStream(overrideMsg) {
+      var msg = (overrideMsg || messageInput.value).trim();
+      if (!msg) return;
+      if (!patientSelect.value) { showPatientRequired(); return; }
+      messageInput.value = '';
+      messageInput.style.height = 'auto';
+      addMessage('user', msg);
+      patientIdForThisChat = patientSelect.value;
+      lockPatientDropdown();
+      sendBtn.disabled = true;
+      messageInput.disabled = true;
+
+      var placeholder = createStreamingPlaceholder();
+      var contentEl = placeholder.querySelector('.message-content');
+      var accumulatedText = '';
+
+      var patientId = patientIdForThisChat || patientSelect.value || null;
+      obsTracker.lastQuery = msg;
+
+      try {
+        var res = await fetch('/api/chat/stream', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            message: msg,
+            session_id: sessionId,
+            patient_id: patientId,
+          }),
+        });
+
+        if (!res.ok) {
+          var errData = await res.json();
+          throw new Error(errData.error || 'Request failed');
+        }
+
+        var reader = res.body.getReader();
+        var decoder = new TextDecoder();
+        var buffer = '';
+        var gotDone = false;
+
+        while (true) {
+          var chunk = await reader.read();
+          if (chunk.done) break;
+          buffer += decoder.decode(chunk.value, { stream: true });
+
+          var result = parseSSEBuffer(buffer);
+          buffer = result.remaining;
+
+          for (var j = 0; j < result.parsed.length; j++) {
+            var evt = result.parsed[j];
+            switch (evt.event) {
+              case 'token':
+                accumulatedText += evt.data.content;
+                contentEl.innerHTML = renderMarkdown(accumulatedText);
+                contentEl.classList.add('md-rendered');
+                scrollToBottom();
+                break;
+              case 'tool_start':
+                addStreamingToolBadge(placeholder, evt.data.tool);
+                break;
+              case 'tool_end':
+                updateStreamingToolBadge(placeholder, evt.data.tool, evt.data.duration_ms);
+                break;
+              case 'done':
+                gotDone = true;
+                // Replace placeholder with full verified message
+                placeholder.remove();
+                addMessage('assistant', evt.data.response, evt.data.tool_calls, evt.data.verification_flags, evt.data.timing, evt.data.structured_result, evt.data.reasoning_steps);
+                obsTracker.record(evt.data, null);
+                break;
+              case 'error':
+                placeholder.remove();
+                addMessage('assistant', 'Error: ' + (evt.data.message || 'Something went wrong.'));
+                obsTracker.record(null, evt.data.message || 'Unknown error');
+                gotDone = true;
+                break;
+            }
+          }
+        }
+        // If stream ended without done/error, clean up placeholder
+        if (!gotDone && placeholder.parentElement) {
+          placeholder.remove();
+          if (accumulatedText) {
+            addMessage('assistant', accumulatedText);
+          } else {
+            addMessage('assistant', 'Error: Stream ended unexpectedly.');
+          }
+        }
+      } catch (err) {
+        if (placeholder.parentElement) placeholder.remove();
+        addMessage('assistant', 'Error: ' + (err.message || 'Something went wrong.'));
+        obsTracker.record(null, err.message || 'Unknown error');
+      }
+      sendBtn.disabled = false;
+      messageInput.disabled = false;
+      messageInput.focus();
+    }
+
+    sendBtn.addEventListener('click', () => sendStream());
     messageInput.addEventListener('keydown', e => {
-      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendStream(); }
     });
     // Auto-resize textarea as user types
     messageInput.addEventListener('input', function() {
@@ -2562,7 +2830,7 @@
           return;
         }
         const prompt = btn.dataset.prompt.replace('{pid}', pid);
-        send(prompt);
+        sendStream(prompt);
       });
     });
 
@@ -2581,10 +2849,10 @@
         const data = await res.json();
         if (data.messages && data.messages.length > 0) {
           chatContainer.innerHTML = '';
-          var assistantIdx = 0;
+          let assistantIdx = 0;
           for (const msg of data.messages) {
             if (msg.role === 'assistant') {
-              var meta = obsTracker.responseLog[assistantIdx] || null;
+              const meta = obsTracker.responseLog[assistantIdx] || null;
               if (meta) {
                 addMessage(msg.role, msg.content, meta.tool_calls, meta.verification_flags, meta.timing, meta.structured_result);
               } else {
