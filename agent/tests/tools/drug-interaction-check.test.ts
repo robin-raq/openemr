@@ -67,6 +67,17 @@ describe("drug_interaction_check", () => {
     }
   });
 
+  it("does not throw when FDA API fails for non-fallback drug pair", async () => {
+    // These drugs are not in the fallback DB, so the tool attempts the FDA API.
+    // In test (no network), this exercises the catch block that previously
+    // referenced undefined `meds[i]`/`meds[j]` instead of `drug1`/`drug2`.
+    const result = await tool.invoke({ medications: ["amlodipine", "gabapentin"] });
+    const data = JSON.parse(result);
+    expect(data.interactions).toBeDefined();
+    // Should gracefully return empty interactions, not throw
+    expect(Array.isArray(data.interactions)).toBe(true);
+  });
+
   it("normalizes drug names with dosage suffixes", async () => {
     // "Warfarin 5mg" should match "warfarin" in fallback DB
     const result = await tool.invoke({ medications: ["Warfarin 5mg", "Aspirin 81mg"] });

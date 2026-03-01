@@ -1,6 +1,7 @@
 import { tool } from "@langchain/core/tools";
 import { z } from "zod";
 import type { DataSource } from "../data/datasource";
+import { getErrorMessage } from "../utils/errors";
 
 export function getLabResults(dataSource: DataSource) {
   return tool(
@@ -19,7 +20,7 @@ export function getLabResults(dataSource: DataSource) {
           critical_count: criticalCount,
         });
       } catch (err) {
-        const message = err instanceof Error ? err.message : "Unknown error";
+        const message = getErrorMessage(err);
         return JSON.stringify({ error: `Lab results retrieval failed: ${message}` });
       }
     },

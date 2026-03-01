@@ -1,6 +1,7 @@
 import { tool } from "@langchain/core/tools";
 import { z } from "zod";
 import type { DataSource } from "../data/datasource";
+import { getErrorMessage } from "../utils/errors";
 
 // Cross-reactivity map: allergen -> medications that may cause reactions
 const CROSS_REACTIVITY: Record<string, string[]> = {
@@ -71,7 +72,7 @@ export function allergyCheck(dataSource: DataSource) {
           proposed_medication,
         });
       } catch (err) {
-        const message = err instanceof Error ? err.message : "Unknown error";
+        const message = getErrorMessage(err);
         return JSON.stringify({ error: `Allergy check failed: ${message}` });
       }
     },

@@ -50,6 +50,7 @@ describe("FhirDataSource", () => {
     const conditions = loadFixture("condition-bundle.json");
     const meds = loadFixture("medication-request-bundle.json");
     const allergies = loadFixture("allergy-intolerance-bundle.json");
+    const vitals = loadFixture("vital-signs-bundle.json");
 
     mockToken();
     mockPatientLookup("90cde167-511f-4f6d-bc97-b65a78cf1995");
@@ -70,6 +71,10 @@ describe("FhirDataSource", () => {
       .mockResolvedValueOnce({
         ok: true,
         json: () => Promise.resolve(allergies),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve(vitals),
       });
   }
 
@@ -101,6 +106,8 @@ describe("FhirDataSource", () => {
     const meds = loadFixture("medication-request-bundle.json");
     const allergies = loadFixture("allergy-intolerance-bundle.json");
 
+    const vitals = loadFixture("vital-signs-bundle.json");
+
     fetchMock.mockImplementation((url: string) => {
       if (url.includes("oauth2") && url.includes("token")) {
         return Promise.resolve({
@@ -119,6 +126,9 @@ describe("FhirDataSource", () => {
       }
       if (url.includes("/AllergyIntolerance")) {
         return Promise.resolve({ ok: true, json: () => Promise.resolve(allergies) });
+      }
+      if (url.includes("/Observation") && url.includes("vital-signs")) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(vitals) });
       }
       return Promise.resolve({ ok: false, status: 404, text: () => Promise.resolve("") });
     });
@@ -175,11 +185,7 @@ describe("FhirDataSource", () => {
       text: () => Promise.resolve("Not found"),
     });
     // FHIR fallback: identifier search returns empty bundle
-    fetchMock.mockResolvedValueOnce({
-      ok: true,
-      json: () => Promise.resolve({ resourceType: "Bundle", entry: [] }),
-    });
-    // FHIR fallback: patient list returns empty bundle (no patient at index 99998)
+    // SEC-002: "Last resort" all-patients fetch removed; only 2 mocks needed
     fetchMock.mockResolvedValueOnce({
       ok: true,
       json: () => Promise.resolve({ resourceType: "Bundle", entry: [] }),
@@ -252,5 +258,76 @@ describe("FhirDataSource", () => {
     const result = await ds.getPatient("1");
 
     expect(result.patient_id).toBe("1");
+  });
+
+  // SEC-005: FHIR timeout test
+  it("throws timeout error when FHIR request takes too long", async () => {
+    mockToken();
+    mockPatientLookup("90cde167-511f-4f6d-bc97-b65a78cf1995");
+
+    // Mock a fetch that respects AbortSignal
+    fetchMock.mockImplementation((url: string, options?: RequestInit) => {
+      if (url.includes("oauth2") && url.includes("token")) {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({ access_token: "tok-123", expires_in: 3600 }),
+        });
+      }
+      if (url.includes("/patient?pid=")) {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({ uuid: "90cde167-511f-4f6d-bc97-b65a78cf1995" }),
+        });
+      }
+      // Simulate abort for FHIR requests
+      return new Promise((_resolve, reject) => {
+        if (options?.signal) {
+          const abortError = new Error("The operation was aborted");
+          abortError.name = "AbortError";
+          options.signal.addEventListener("abort", () => reject(abortError));
+        }
+      });
+    });
+
+    const ds = new FhirDataSource(config);
+
+    // The FHIR timeout is 10s — use vi.useFakeTimers to speed this up
+    vi.useFakeTimers();
+    const promise = ds.getMedications("1");
+    vi.advanceTimersByTime(11_000);
+    vi.useRealTimers();
+
+    await expect(promise).rejects.toThrow("FHIR request timed out");
+  });
+
+  // SEC-008: Error message sanitization test
+  it("does not leak FHIR response body in error messages", async () => {
+    mockToken();
+    mockPatientLookup("90cde167-511f-4f6d-bc97-b65a78cf1995");
+
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    fetchMock.mockResolvedValueOnce({
+      ok: false,
+      status: 500,
+      text: () => Promise.resolve("Internal FHIR error with sensitive details: user=admin password=secret"),
+    });
+
+    const ds = new FhirDataSource(config);
+
+    try {
+      await ds.getMedications("1");
+    } catch (err: any) {
+      // Error message should only contain status code, not response body
+      expect(err.message).toBe("FHIR request failed: 500");
+      expect(err.message).not.toContain("sensitive");
+      expect(err.message).not.toContain("password");
+    }
+
+    // But details should be logged internally
+    expect(consoleSpy).toHaveBeenCalledWith(
+      expect.stringContaining("FHIR error details"),
+      expect.stringContaining("sensitive")
+    );
+    consoleSpy.mockRestore();
   });
 });

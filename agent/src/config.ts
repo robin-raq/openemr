@@ -23,7 +23,10 @@ function deriveFhirUrls(baseUrl: string): {
   };
 }
 
+let cachedDataSource: DataSource | null = null;
+
 export function getDataSource(): DataSource {
+  if (cachedDataSource) return cachedDataSource;
   const source = process.env.DATA_SOURCE || "mock";
   if (source === "fhir") {
     const baseUrl = process.env.FHIR_BASE_URL;
@@ -39,7 +42,7 @@ export function getDataSource(): DataSource {
 
     const { fhirBaseUrl, apiBaseUrl, tokenUrl } = deriveFhirUrls(baseUrl);
 
-    return new FhirDataSource({
+    cachedDataSource = new FhirDataSource({
       fhirBaseUrl,
       apiBaseUrl,
       tokenUrl,
@@ -49,12 +52,28 @@ export function getDataSource(): DataSource {
       password,
       scope: process.env.FHIR_SCOPE,
     });
+    return cachedDataSource;
   }
-  return new MockDataSource();
+  cachedDataSource = new MockDataSource();
+  return cachedDataSource;
 }
 
-function isPlaceholderKey(key: string): boolean {
-  return key.includes("...");
+// SEC-006: Stronger placeholder detection for secrets
+export function isPlaceholderKey(key: string): boolean {
+  const lower = key.toLowerCase();
+  return (
+    key.includes("...") ||
+    lower.includes("changeme") ||
+    lower.includes("placeholder") ||
+    lower.includes("<your") ||
+    lower.includes("your_") ||
+    lower.includes("replace_me") ||
+    lower === "xxx" ||
+    lower === "xxxx" ||
+    lower.includes("todo") ||
+    lower.includes("insert_") ||
+    lower.includes("sk-ant-placeholder")
+  );
 }
 
 export function getAnthropicApiKey(): string {
@@ -65,32 +84,63 @@ export function getAnthropicApiKey(): string {
   return key;
 }
 
-export const PORT = parseInt(process.env.PORT || "3000", 10);
+// SEC-006: PORT bounds validation
+const parsedPort = parseInt(process.env.PORT || "3000", 10);
+export const PORT = Number.isNaN(parsedPort) || parsedPort < 1 || parsedPort > 65535 ? 3000 : parsedPort;
+
+let langfuseInitialized = false;
+
+export function initLangfuse(): boolean {
+  if (langfuseInitialized) return true;
+
+  const secretKey = process.env.LANGFUSE_SECRET_KEY;
+  const publicKey = process.env.LANGFUSE_PUBLIC_KEY;
+
+  if (!secretKey || !publicKey) return false;
+  if (isPlaceholderKey(secretKey) || isPlaceholderKey(publicKey)) {
+    console.warn("Langfuse keys contain placeholders — observability disabled. Add real keys to .env");
+    return false;
+  }
+
+  try {
+    const { NodeTracerProvider } = require("@opentelemetry/sdk-trace-node");
+    const { LangfuseSpanProcessor } = require("@langfuse/otel");
+    const { setLangfuseTracerProvider } = require("@langfuse/tracing");
+
+    const provider = new NodeTracerProvider({
+      spanProcessors: [new LangfuseSpanProcessor()],
+    });
+    setLangfuseTracerProvider(provider);
+    langfuseInitialized = true;
+    console.log("Langfuse OTel tracing initialized");
+    return true;
+  } catch (err) {
+    console.warn("Failed to initialize Langfuse OTel:", err instanceof Error ? err.message : err);
+    return false;
+  }
+}
 
 export function getLangfuseCallbacks(sessionId?: string): unknown[] {
+  if (!langfuseInitialized) return [];
+
   try {
-    const secretKey = process.env.LANGFUSE_SECRET_KEY;
-    const publicKey = process.env.LANGFUSE_PUBLIC_KEY;
-
-    if (!secretKey || !publicKey) {
-      return [];
-    }
-
-    if (isPlaceholderKey(secretKey) || isPlaceholderKey(publicKey)) {
-      console.warn("Langfuse keys contain placeholders — observability disabled. Add real keys to .env");
-      return [];
-    }
-
     const { CallbackHandler } = require("@langfuse/langchain");
     return [
       new CallbackHandler({
         sessionId: sessionId || "default",
         tags: ["agentforge"],
-        baseUrl: process.env.LANGFUSE_HOST || "https://cloud.langfuse.com",
       }),
     ];
-  } catch {
-    // @langfuse/langchain not installed or init failed
+  } catch (err) {
+    console.warn("Langfuse callback handler init failed:", err instanceof Error ? err.message : err);
   }
   return [];
+}
+
+export function warnInsecureTls(): void {
+  if (process.env.NODE_TLS_REJECT_UNAUTHORIZED === "0") {
+    console.warn(
+      "WARNING: NODE_TLS_REJECT_UNAUTHORIZED=0 — TLS certificate verification is disabled. Do not use in production."
+    );
+  }
 }

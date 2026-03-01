@@ -1,0 +1,63 @@
+{
+  "resourceType": "Bundle",
+  "type": "searchset",
+  "entry": [
+    {
+      "resource": {
+        "resourceType": "Observation",
+        "code": {
+          "text": "Blood Pressure",
+          "coding": [{ "code": "85354-9", "display": "Blood Pressure" }]
+        },
+        "component": [
+          {
+            "code": { "coding": [{ "code": "8480-6", "display": "Systolic" }] },
+            "valueQuantity": { "value": 145, "unit": "mmHg" }
+          },
+          {
+            "code": { "coding": [{ "code": "8462-4", "display": "Diastolic" }] },
+            "valueQuantity": { "value": 92, "unit": "mmHg" }
+          }
+        ],
+        "interpretation": [{ "coding": [{ "code": "H" }] }],
+        "effectiveDateTime": "2024-01-10"
+      }
+    },
+    {
+      "resource": {
+        "resourceType": "Observation",
+        "code": {
+          "text": "Heart Rate",
+          "coding": [{ "code": "8867-4", "display": "Heart Rate" }]
+        },
+        "valueQuantity": { "value": 78, "unit": "bpm" },
+        "interpretation": [{ "coding": [{ "code": "N" }] }],
+        "effectiveDateTime": "2024-01-10"
+      }
+    },
+    {
+      "resource": {
+        "resourceType": "Observation",
+        "code": {
+          "text": "Temperature",
+          "coding": [{ "code": "8310-5", "display": "Body Temperature" }]
+        },
+        "valueQuantity": { "value": 98.6, "unit": "°F" },
+        "interpretation": [{ "coding": [{ "code": "N" }] }],
+        "effectiveDateTime": "2024-01-10"
+      }
+    },
+    {
+      "resource": {
+        "resourceType": "Observation",
+        "code": {
+          "text": "SpO2",
+          "coding": [{ "code": "2708-6", "display": "Oxygen Saturation" }]
+        },
+        "valueQuantity": { "value": 98, "unit": "%" },
+        "interpretation": [{ "coding": [{ "code": "N" }] }],
+        "effectiveDateTime": "2024-01-10"
+      }
+    }
+  ]
+}
